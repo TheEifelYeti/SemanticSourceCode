@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Services;
 
@@ -170,7 +171,7 @@ class Program
                     continue;
                 }
 
-                Console.WriteLine($"\nFound {results.Count} results:\");
+                Console.WriteLine($"\nFound {results.Count} results:");
                 Console.WriteLine(new string('=', 80));
 
                 for (int i = 0; i < results.Count; i++)

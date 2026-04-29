@@ -16,6 +16,8 @@
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
   </ItemGroup>
 
@@ -23,6 +25,9 @@
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <Compile Remove="SemanticSourceCode.Tests\**" />
+    <EmbeddedResource Remove="SemanticSourceCode.Tests\**" />
+    <None Remove="SemanticSourceCode.Tests\**" />
   </ItemGroup>
 
 </Project>
