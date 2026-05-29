@@ -177,8 +177,8 @@ class Program
             {
                 var queryEmbedding = await embeddingService.GenerateEmbeddingAsync(query);
                 
-                // Get minimum similarity threshold from config (default: 0.85)
-                var minSimilarity = configuration.GetValue<float>("Search:MinimumSimilarity", 0.85f);
+                // Get minimum similarity threshold from config (default: 0.70)
+                var minSimilarity = configuration.GetValue<float>("Search:MinimumSimilarity", 0.70f);
                 var resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: 20);
                 
                 // Filter by minimum similarity
@@ -187,10 +187,24 @@ class Program
                     .Take(5)
                     .ToList();
 
-                if (filteredResults.Count == 0)
+                // Calculate average score to detect potentially irrelevant queries
+                var avgScore = resultsWithScores.Count > 0 ? resultsWithScores.Average(r => r.Similarity) : 0;
+                var maxScore = resultsWithScores.Count > 0 ? resultsWithScores.Max(r => r.Similarity) : 0;
+                
+                // If top score is below threshold but not extremely low, show as "weak match"
+                if (filteredResults.Count == 0 && maxScore >= 0.30f)
                 {
-                    Console.WriteLine($"No results found with similarity >= {minSimilarity:F2}.");
-                    Console.WriteLine($"Tip: Try a more specific query related to code (e.g., 'database connection', 'async method').");
+                    var weakMatches = resultsWithScores.Take(3).ToList();
+                    Console.WriteLine($"Weak matches found (similarity < {minSimilarity:F2}):");
+                    Console.WriteLine();
+                    for (int i = 0; i < weakMatches.Count; i++)
+                    {
+                        var (result, score) = weakMatches[i];
+                        Console.WriteLine($"{i + 1}. {result.NamespaceName}.{result.ClassName}.{result.MemberName}");
+                        Console.WriteLine($"   Similarity: {score:F4}");
+                    }
+                    Console.WriteLine();
+                    Console.WriteLine($"Tip: Results may be less relevant. Try a more specific query.");
                     continue;
                 }
 
