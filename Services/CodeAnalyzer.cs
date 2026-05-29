@@ -8,6 +8,16 @@ namespace SemanticSourceCode.Services;
 
 public class CodeAnalyzer : ICodeAnalyzer
 {
+    /// <summary>
+    /// Detected ASP.NET patterns in the current project.
+    /// </summary>
+    public bool IsAspNetProject { get; private set; }
+
+    /// <summary>
+    /// Cache for quick lookup: qualified name → chunk ID.
+    /// </summary>
+    private Dictionary<string, string> _qualifiedNameToChunkId = new();
+
     public async Task<List<CodeChunk>> AnalyzeFileAsync(string filePath)
     {
         var chunks = new List<CodeChunk>();
@@ -15,6 +25,16 @@ public class CodeAnalyzer : ICodeAnalyzer
         var tree = CSharpSyntaxTree.ParseText(code);
         var root = await tree.GetRootAsync();
         var lines = code.Split('\n');
+
+        // Detect ASP.NET patterns
+        var isController = IsControllerFile(root);
+        var isService = IsServiceFile(root);
+        var isMiddleware = IsMiddlewareFile(root);
+        
+        if (isController || isService || isMiddleware)
+        {
+            IsAspNetProject = true;
+        }
 
         var namespaceDeclarations = root.DescendantNodes().OfType<NamespaceDeclarationSyntax>()
             .Concat(root.DescendantNodes().OfType<FileScopedNamespaceDeclarationSyntax>().Cast<BaseNamespaceDeclarationSyntax>());
@@ -30,10 +50,24 @@ public class CodeAnalyzer : ICodeAnalyzer
                 var className = classDecl.Identifier.Text;
                 var classDocumentation = GetDocumentation(classDecl);
 
+                // Detect class-level framework attributes
+                var routePrefix = GetRoutePrefix(classDecl);
+
                 // Analyze methods
                 foreach (var method in classDecl.Members.OfType<MethodDeclarationSyntax>())
                 {
                     var chunk = CreateMethodChunk(filePath, namespaceName, className, method, classDocumentation, lines);
+                    
+                    // Apply framework metadata
+                    chunk.IsController = isController;
+                    chunk.IsService = isService;
+                    chunk.IsMiddleware = isMiddleware;
+                    chunk.RouteTemplate = GetRouteTemplate(method, routePrefix);
+                    chunk.HttpMethods = GetHttpMethods(method);
+                    
+                    // Extract call targets (for call graph)
+                    chunk.CallsTo = ExtractCallTargets(method);
+                    
                     chunks.Add(chunk);
                 }
 
@@ -41,6 +75,8 @@ public class CodeAnalyzer : ICodeAnalyzer
                 foreach (var property in classDecl.Members.OfType<PropertyDeclarationSyntax>())
                 {
                     var chunk = CreatePropertyChunk(filePath, namespaceName, className, property, classDocumentation, lines);
+                    chunk.IsController = isController;
+                    chunk.IsService = isService;
                     chunks.Add(chunk);
                 }
 
@@ -48,6 +84,8 @@ public class CodeAnalyzer : ICodeAnalyzer
                 foreach (var ctor in classDecl.Members.OfType<ConstructorDeclarationSyntax>())
                 {
                     var chunk = CreateConstructorChunk(filePath, namespaceName, className, ctor, classDocumentation, lines);
+                    chunk.IsService = isService;
+                    chunk.CallsTo = ExtractCallTargets(ctor);
                     chunks.Add(chunk);
                 }
 
@@ -58,6 +96,13 @@ public class CodeAnalyzer : ICodeAnalyzer
                     chunks.Add(chunk);
                 }
             }
+        }
+
+        // Build qualified name mapping for call graph resolution
+        foreach (var chunk in chunks)
+        {
+            var qualifiedName = $"{chunk.NamespaceName}.{chunk.ClassName}.{chunk.MemberName}";
+            _qualifiedNameToChunkId[qualifiedName] = chunk.Id;
         }
 
         return chunks;
@@ -81,8 +126,196 @@ public class CodeAnalyzer : ICodeAnalyzer
             }
         }
 
+        // Second pass: resolve call graph edges
+        ResolveCallGraphEdges(allChunks);
+
         return allChunks;
     }
+
+    /// <summary>
+    /// Resolves call targets to actual chunk IDs using qualified names.
+    /// </summary>
+    private void ResolveCallGraphEdges(List<CodeChunk> chunks)
+    {
+        foreach (var chunk in chunks)
+        {
+            var resolvedCalls = new List<string>();
+            foreach (var call in chunk.CallsTo)
+            {
+                // Try exact match first
+                if (_qualifiedNameToChunkId.TryGetValue(call, out var targetId))
+                {
+                    resolvedCalls.Add(targetId);
+                    continue;
+                }
+
+                // Try partial match (class name only)
+                var classOnly = call.Split('.').LastOrDefault();
+                if (!string.IsNullOrEmpty(classOnly))
+                {
+                    var matching = _qualifiedNameToChunkId.Keys
+                        .Where(k => k.EndsWith($".{classOnly}") || k.Contains($".{classOnly}."))
+                        .Select(k => _qualifiedNameToChunkId[k])
+                        .FirstOrDefault();
+                    
+                    if (matching != null)
+                    {
+                        resolvedCalls.Add(matching);
+                    }
+                }
+            }
+            chunk.CallsTo = resolvedCalls;
+        }
+    }
+
+    #region Framework Detection
+
+    private bool IsControllerFile(SyntaxNode root)
+    {
+        var classDecls = root.DescendantNodes().OfType<ClassDeclarationSyntax>();
+        return classDecls.Any(c => 
+            c.BaseList?.Types.Any(b => 
+                b.ToString().Contains("Controller") || 
+                b.ToString().Contains("ControllerBase")
+            ) == true ||
+            c.AttributeLists.SelectMany(a => a.Attributes).Any(a => 
+                a.Name.ToString().Contains("ApiController") ||
+                a.Name.ToString().Contains("Route")
+            )
+        );
+    }
+
+    private bool IsServiceFile(SyntaxNode root)
+    {
+        var classDecls = root.DescendantNodes().OfType<ClassDeclarationSyntax>();
+        return classDecls.Any(c => 
+            c.Identifier.Text.EndsWith("Service") ||
+            c.Identifier.Text.EndsWith("Repository") ||
+            c.Identifier.Text.StartsWith("I") && c.Identifier.Text.Length > 1
+        );
+    }
+
+    private bool IsMiddlewareFile(SyntaxNode root)
+    {
+        var classDecls = root.DescendantNodes().OfType<ClassDeclarationSyntax>();
+        return classDecls.Any(c => 
+            c.Identifier.Text.Contains("Middleware") ||
+            c.BaseList?.Types.Any(b => b.ToString().Contains("IMiddleware")) == true
+        );
+    }
+
+    private string? GetRoutePrefix(ClassDeclarationSyntax classDecl)
+    {
+        var routeAttr = classDecl.AttributeLists
+            .SelectMany(a => a.Attributes)
+            .FirstOrDefault(a => a.Name.ToString() == "Route");
+        
+        if (routeAttr?.ArgumentList?.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax literal)
+        {
+            return literal.Token.ValueText;
+        }
+        return null;
+    }
+
+    private string? GetRouteTemplate(MethodDeclarationSyntax method, string? routePrefix)
+    {
+        var httpAttrs = method.AttributeLists
+            .SelectMany(a => a.Attributes)
+            .Where(a => a.Name.ToString().StartsWith("Http") || a.Name.ToString() == "Route");
+        
+        var templates = new List<string>();
+        foreach (var attr in httpAttrs)
+        {
+            if (attr.ArgumentList?.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax literal)
+            {
+                var template = literal.Token.ValueText;
+                if (!string.IsNullOrEmpty(routePrefix))
+                {
+                    template = routePrefix.TrimEnd('/') + "/" + template.TrimStart('/');
+                }
+                templates.Add(template);
+            }
+        }
+        
+        return templates.Count > 0 ? string.Join(", ", templates) : null;
+    }
+
+    private string? GetHttpMethods(MethodDeclarationSyntax method)
+    {
+        var httpAttrs = method.AttributeLists
+            .SelectMany(a => a.Attributes)
+            .Where(a => a.Name.ToString().StartsWith("Http"));
+        
+        var methods = httpAttrs.Select(a => a.Name.ToString().Replace("Http", "")).ToList();
+        return methods.Count > 0 ? string.Join(", ", methods) : null;
+    }
+
+    #endregion
+
+    #region Call Graph Extraction
+
+    private List<string> ExtractCallTargets(MethodDeclarationSyntax method)
+    {
+        var targets = new List<string>();
+        var invocations = method.DescendantNodes().OfType<InvocationExpressionSyntax>();
+        
+        foreach (var invocation in invocations)
+        {
+            var target = GetInvocationTarget(invocation);
+            if (!string.IsNullOrEmpty(target))
+            {
+                targets.Add(target);
+            }
+        }
+        
+        // Also extract object creations
+        var objectCreations = method.DescendantNodes().OfType<ObjectCreationExpressionSyntax>();
+        foreach (var creation in objectCreations)
+        {
+            var typeName = creation.Type.ToString();
+            if (!string.IsNullOrEmpty(typeName))
+            {
+                targets.Add(typeName);
+            }
+        }
+        
+        return targets.Distinct().ToList();
+    }
+
+    private List<string> ExtractCallTargets(ConstructorDeclarationSyntax ctor)
+    {
+        var targets = new List<string>();
+        var invocations = ctor.DescendantNodes().OfType<InvocationExpressionSyntax>();
+        
+        foreach (var invocation in invocations)
+        {
+            var target = GetInvocationTarget(invocation);
+            if (!string.IsNullOrEmpty(target))
+            {
+                targets.Add(target);
+            }
+        }
+        
+        return targets.Distinct().ToList();
+    }
+
+    private string GetInvocationTarget(InvocationExpressionSyntax invocation)
+    {
+        if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+        {
+            // instance.Method() or Type.Method()
+            return $"{memberAccess.Expression}.{memberAccess.Name}";
+        }
+        else if (invocation.Expression is IdentifierNameSyntax identifier)
+        {
+            // Method() - likely within same class
+            return identifier.Identifier.Text;
+        }
+        
+        return invocation.Expression.ToString();
+    }
+
+    #endregion
 
     private CodeChunk CreateMethodChunk(string filePath, string namespaceName, string className, 
         MethodDeclarationSyntax method, string classDocumentation, string[] lines)
@@ -188,21 +421,27 @@ public class CodeAnalyzer : ICodeAnalyzer
     private string GetDocumentation(SyntaxNode node)
     {
         var trivia = node.GetLeadingTrivia();
-        var xmlComment = trivia
-            .Where(t => t.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia) ||
-                       t.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
-            .Select(t => t.ToString())
+        var xmlTrivia = trivia
+            .Where(t => t.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia) || 
+                         t.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
             .FirstOrDefault();
+        
+        if (xmlTrivia.Token.Parent == null)
+            return "";
 
-        return xmlComment ?? string.Empty;
+        return xmlTrivia.ToString().Trim();
     }
 
-    private string BuildContent(IEnumerable<string?> parts)
+    private string BuildContent(string[] parts)
     {
         var sb = new StringBuilder();
-        foreach (var part in parts.Where(p => !string.IsNullOrWhiteSpace(p)))
+        foreach (var part in parts)
         {
-            sb.AppendLine(part);
+            if (!string.IsNullOrWhiteSpace(part))
+            {
+                if (sb.Length > 0) sb.AppendLine();
+                sb.AppendLine(part.Trim());
+            }
         }
         return sb.ToString().Trim();
     }

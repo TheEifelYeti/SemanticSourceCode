@@ -47,6 +47,19 @@ public class SqliteVssDatabase : IVectorDatabase
             CREATE INDEX IF NOT EXISTS idx_filepath ON CodeChunks(FilePath);
             CREATE INDEX IF NOT EXISTS idx_classname ON CodeChunks(ClassName);
             CREATE INDEX IF NOT EXISTS idx_membertype ON CodeChunks(MemberType);
+
+            CREATE TABLE IF NOT EXISTS CallEdges (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                SourceChunkId TEXT NOT NULL,
+                TargetChunkId TEXT NOT NULL,
+                CallType TEXT NOT NULL,
+                LineNumber INTEGER,
+                FOREIGN KEY (SourceChunkId) REFERENCES CodeChunks(Id),
+                FOREIGN KEY (TargetChunkId) REFERENCES CodeChunks(Id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_caller ON CallEdges(SourceChunkId);
+            CREATE INDEX IF NOT EXISTS idx_callee ON CallEdges(TargetChunkId);
         ";
 
         using var command = new SqliteCommand(createTableCmd, connection);
@@ -221,5 +234,143 @@ public class SqliteVssDatabase : IVectorDatabase
             return 0;
 
         return dotProduct / (float)(Math.Sqrt(normA) * Math.Sqrt(normB));
+    }
+
+    /// <summary>
+    /// Adds a call edge between two code chunks.
+    /// </summary>
+    public async Task AddCallEdgeAsync(string sourceChunkId, string targetChunkId, string callType, int lineNumber)
+    {
+        await EnsureInitializedAsync();
+
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        var insertCmd = @"
+            INSERT OR IGNORE INTO CallEdges (SourceChunkId, TargetChunkId, CallType, LineNumber)
+            VALUES (@SourceChunkId, @TargetChunkId, @CallType, @LineNumber)";
+
+        using var command = new SqliteCommand(insertCmd, connection);
+        command.Parameters.AddWithValue("@SourceChunkId", sourceChunkId);
+        command.Parameters.AddWithValue("@TargetChunkId", targetChunkId);
+        command.Parameters.AddWithValue("@CallType", callType);
+        command.Parameters.AddWithValue("@LineNumber", lineNumber);
+
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Gets all chunks that call the specified chunk.
+    /// </summary>
+    public async Task<List<CodeChunk>> GetCallersAsync(string chunkId)
+    {
+        await EnsureInitializedAsync();
+
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        var selectCmd = @"
+            SELECT c.* FROM CodeChunks c
+            JOIN CallEdges e ON c.Id = e.SourceChunkId
+            WHERE e.TargetChunkId = @ChunkId
+            ORDER BY e.LineNumber";
+
+        using var command = new SqliteCommand(selectCmd, connection);
+        command.Parameters.AddWithValue("@ChunkId", chunkId);
+
+        var results = new List<CodeChunk>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            results.Add(ReadChunkFromReader(reader));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Gets all chunks called by the specified chunk.
+    /// </summary>
+    public async Task<List<CodeChunk>> GetCalleesAsync(string chunkId)
+    {
+        await EnsureInitializedAsync();
+
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        var selectCmd = @"
+            SELECT c.* FROM CodeChunks c
+            JOIN CallEdges e ON c.Id = e.TargetChunkId
+            WHERE e.SourceChunkId = @ChunkId
+            ORDER BY e.LineNumber";
+
+        using var command = new SqliteCommand(selectCmd, connection);
+        command.Parameters.AddWithValue("@ChunkId", chunkId);
+
+        var results = new List<CodeChunk>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            results.Add(ReadChunkFromReader(reader));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Gets the impact radius of a chunk (callers up to N levels deep).
+    /// </summary>
+    public async Task<List<CodeChunk>> GetImpactRadiusAsync(string chunkId, int maxDepth = 3)
+    {
+        await EnsureInitializedAsync();
+
+        var visited = new HashSet<string>();
+        var results = new List<CodeChunk>();
+        var queue = new Queue<(string Id, int Depth)>();
+        queue.Enqueue((chunkId, 0));
+
+        while (queue.Count > 0)
+        {
+            var (currentId, depth) = queue.Dequeue();
+            
+            if (depth >= maxDepth || visited.Contains(currentId))
+                continue;
+                
+            visited.Add(currentId);
+
+            var callers = await GetCallersAsync(currentId);
+            foreach (var caller in callers)
+            {
+                if (!visited.Contains(caller.Id))
+                {
+                    results.Add(caller);
+                    queue.Enqueue((caller.Id, depth + 1));
+                }
+            }
+        }
+
+        return results;
+    }
+
+    private CodeChunk ReadChunkFromReader(SqliteDataReader reader)
+    {
+        return new CodeChunk
+        {
+            Id = reader.GetString(0),
+            FilePath = reader.GetString(1),
+            NamespaceName = reader.GetString(2),
+            ClassName = reader.GetString(3),
+            MemberName = reader.GetString(4),
+            MemberType = reader.GetString(5),
+            Content = reader.GetString(6),
+            Signature = reader.GetString(7),
+            Documentation = reader.GetString(8),
+            StartLine = reader.GetInt32(9),
+            EndLine = reader.GetInt32(10),
+            IndexedAt = DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
+        };
     }
 }
