@@ -56,7 +56,10 @@ public class LMStudioEmbeddingService : IEmbeddingService
                 throw new HttpRequestException($"LM Studio is not responding. Status: {response.StatusCode}");
             }
             
-            var modelsResponse = await response.Content.ReadFromJsonAsync<ModelsResponse>();
+            var responseText = await response.Content.ReadAsStringAsync();
+            _logger?.LogDebug("LM Studio /v1/models response: {Response}", responseText);
+            
+            var modelsResponse = JsonSerializer.Deserialize<ModelsResponse>(responseText);
             var loadedModels = modelsResponse?.Data?.Select(m => m.Id).ToList() ?? new List<string>();
             
             if (loadedModels.Count == 0)
@@ -67,18 +70,20 @@ public class LMStudioEmbeddingService : IEmbeddingService
             
             _logger?.LogInformation("LM Studio has {Count} model(s) loaded: {Models}", loadedModels.Count, string.Join(", ", loadedModels));
             
-            // If no model configured, use the first loaded model
-            if (string.IsNullOrEmpty(_embeddingModel))
+            // Always use the first loaded model - LM Studio only supports one model at a time for embeddings
+            var selectedModel = loadedModels.First();
+            
+            if (!string.IsNullOrEmpty(_embeddingModel) && !loadedModels.Any(m => m.Equals(_embeddingModel, StringComparison.OrdinalIgnoreCase)))
             {
-                _embeddingModel = loadedModels.First();
-                _logger?.LogInformation("Auto-selected model: {Model}", _embeddingModel);
+                _logger?.LogWarning("Configured model '{Configured}' not found. Loaded models: {Loaded}. Using: {Selected}",
+                    _embeddingModel, string.Join(", ", loadedModels), selectedModel);
             }
-            else if (!loadedModels.Any(m => m.Equals(_embeddingModel, StringComparison.OrdinalIgnoreCase)))
+            else
             {
-                _logger?.LogWarning("Configured model '{Configured}' not found. Loaded models: {Loaded}. Using first loaded model.",
-                    _embeddingModel, string.Join(", ", loadedModels));
-                _embeddingModel = loadedModels.First();
+                _logger?.LogInformation("Using loaded model: {Model}", selectedModel);
             }
+            
+            _embeddingModel = selectedModel;
         }
         catch (Exception ex) when (ex is not InvalidOperationException)
         {
