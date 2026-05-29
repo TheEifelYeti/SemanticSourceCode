@@ -192,7 +192,19 @@ public class SqliteVssDatabase : IVectorDatabase
     private float CosineSimilarity(float[] a, float[] b)
     {
         if (a.Length != b.Length)
-            throw new ArgumentException("Arrays must have same length");
+        {
+            _logger?.LogWarning("Embedding dimension mismatch: query={QueryDim}, chunk={ChunkDim}. Truncating to minimum.", a.Length, b.Length);
+            
+            // Truncate to minimum length
+            var minLength = Math.Min(a.Length, b.Length);
+            var aTruncated = new float[minLength];
+            var bTruncated = new float[minLength];
+            Array.Copy(a, aTruncated, minLength);
+            Array.Copy(b, bTruncated, minLength);
+            
+            a = aTruncated;
+            b = bTruncated;
+        }
 
         float dotProduct = 0;
         float normA = 0;
