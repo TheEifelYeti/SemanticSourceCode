@@ -20,7 +20,13 @@ class Program
         var services = new ServiceCollection();
         services.AddSingleton<IConfiguration>(configuration);
         services.AddTransient<ICodeAnalyzer, CodeAnalyzer>();
-        services.AddTransient<IEmbeddingService, OllamaEmbeddingService>();
+        services.AddTransient<IEmbeddingService>(provider =>
+        {
+            var factory = new EmbeddingServiceFactory(
+                provider.GetRequiredService<IConfiguration>(),
+                provider.GetRequiredService<ILoggerFactory>());
+            return factory.CreateEmbeddingService();
+        });
         services.AddTransient<IVectorDatabase, SqliteVssDatabase>();
         
         // Add logging
