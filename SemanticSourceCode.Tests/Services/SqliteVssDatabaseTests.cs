@@ -270,7 +270,191 @@ public class SqliteVssDatabaseTests : IDisposable
         Assert.True(await _database.IsInitializedAsync());
     }
 
-    private CodeChunk CreateTestChunk(string memberName, float[]? embedding = null, string? id = null)
+    /// <summary>
+    /// Tests that a semantically related query returns high similarity scores
+    /// when searching against code-related chunks with similar meaning.
+    /// </summary>
+    [Fact]
+    public async Task SearchSimilarWithScoresAsync_SemanticallyRelatedQuery_ReturnsHighScores()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        
+        // Create code-related chunks with embeddings pointing in similar directions
+        var codeChunks = new List<CodeChunk>
+        {
+            CreateTestChunk("GetUserById", new float[] { 0.9f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("SaveToDatabase", new float[] { 0.85f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("ProcessRequest", new float[] { 0.8f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("ValidateInput", new float[] { 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f }) // Different direction
+        };
+        await _database.InsertChunksAsync(codeChunks);
+
+        // Act - Search with an embedding similar to the first three chunks
+        var queryEmbedding = new float[] { 0.95f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+        var results = await _database.SearchSimilarWithScoresAsync(queryEmbedding, 5);
+
+        // Assert - Should return results with high similarity scores
+        Assert.True(results.Count >= 3, "Expected at least 3 results");
+        
+        // Top results should have very high similarity (> 0.8)
+        var topResults = results.Take(3);
+        Assert.All(topResults, r => Assert.True(r.Similarity > 0.8f, 
+            $"Expected similarity > 0.8 but got {r.Similarity:F4} for {r.Chunk.MemberName}"));
+        
+        // The dissimilar chunk should have much lower score
+        var validateInputResult = results.FirstOrDefault(r => r.Chunk.MemberName == "ValidateInput");
+        if (validateInputResult != default)
+        {
+            Assert.True(validateInputResult.Similarity < 0.5f,
+                $"Expected dissimilar chunk to have score < 0.5 but got {validateInputResult.Similarity:F4}");
+        }
+    }
+
+    /// <summary>
+    /// Tests that results are properly ordered by similarity score (highest first).
+    /// </summary>
+    [Fact]
+    public async Task SearchSimilarWithScoresAsync_ResultsOrderedBySimilarity()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        var chunks = new List<CodeChunk>
+        {
+            CreateTestChunk("ExactMatch", new float[] { 1.0f, 0.0f, 0.0f }),
+            CreateTestChunk("CloseMatch", new float[] { 0.9f, 0.1f, 0.0f }),
+            CreateTestChunk("MediumMatch", new float[] { 0.7f, 0.3f, 0.0f }),
+            CreateTestChunk("LowMatch", new float[] { 0.5f, 0.5f, 0.0f })
+        };
+        await _database.InsertChunksAsync(chunks);
+
+        // Act
+        var queryEmbedding = new float[] { 1.0f, 0.0f, 0.0f };
+        var results = await _database.SearchSimilarWithScoresAsync(queryEmbedding, 4);
+
+        // Assert
+        Assert.Equal(4, results.Count);
+        
+        // Verify descending order
+        for (int i = 1; i < results.Count; i++)
+        {
+            Assert.True(results[i - 1].Similarity >= results[i].Similarity,
+                $"Results not ordered by similarity. Index {i - 1}: {results[i - 1].Similarity:F4}, Index {i}: {results[i].Similarity:F4}");
+        }
+        
+        // Verify expected order
+        Assert.Equal("ExactMatch", results[0].Chunk.MemberName);
+        Assert.Equal("CloseMatch", results[1].Chunk.MemberName);
+    }
+
+    /// <summary>
+    /// Tests that empty query embedding throws InvalidOperationException.
+    /// </summary>
+    [Fact]
+    public async Task SearchSimilarWithScoresAsync_EmptyQueryEmbedding_ThrowsException()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        var chunk = CreateTestChunk("Test", new float[] { 1.0f, 0.0f, 0.0f });
+        await _database.InsertChunkAsync(chunk);
+
+        // Act & Assert
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _database.SearchSimilarWithScoresAsync(Array.Empty<float>(), 5));
+        Assert.Contains("embedding", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Tests that updating a chunk's embedding changes search results.
+    /// </summary>
+    [Fact]
+    public async Task InsertChunkAsync_UpdateEmbedding_ChangesSearchResults()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        var id = Guid.NewGuid().ToString();
+        var chunk1 = CreateTestChunk("OriginalDirection", new float[] { 1.0f, 0.0f, 0.0f }, id);
+        await _database.InsertChunkAsync(chunk1);
+
+        // Act - Update with different embedding
+        var chunk2 = CreateTestChunk("NewDirection", new float[] { 0.0f, 1.0f, 0.0f }, id);
+        await _database.InsertChunkAsync(chunk2);
+
+        // Assert - Search in original direction should now find nothing or low score
+        var queryEmbedding = new float[] { 1.0f, 0.0f, 0.0f };
+        var results = await _database.SearchSimilarWithScoresAsync(queryEmbedding, 5);
+        
+        // After update, the chunk points in different direction, so similarity should be low
+        if (results.Count > 0)
+        {
+            Assert.True(results[0].Similarity < 0.5f,
+                $"Expected low similarity after embedding update, but got {results[0].Similarity:F4}");
+        }
+        
+        // Search in new direction should find it
+        var newQueryEmbedding = new float[] { 0.0f, 1.0f, 0.0f };
+        var newResults = await _database.SearchSimilarWithScoresAsync(newQueryEmbedding, 5);
+        Assert.True(newResults.Count > 0, "Expected to find chunk after updating embedding to new direction");
+        Assert.True(newResults[0].Similarity > 0.9f,
+            $"Expected high similarity for new direction, but got {newResults[0].Similarity:F4}");
+    }
+
+    /// <summary>
+    /// Tests that SearchSimilarAsync (without scores) returns same chunks as SearchSimilarWithScoresAsync.
+    /// </summary>
+    [Fact]
+    public async Task SearchSimilarAsync_And_SearchSimilarWithScoresAsync_ReturnSameChunks()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        var chunks = new List<CodeChunk>
+        {
+            CreateTestChunk("Method1", new float[] { 0.9f, 0.1f, 0.0f }),
+            CreateTestChunk("Method2", new float[] { 0.1f, 0.9f, 0.0f }),
+            CreateTestChunk("Method3", new float[] { 0.5f, 0.5f, 0.0f })
+        };
+        await _database.InsertChunksAsync(chunks);
+
+        // Act
+        var queryEmbedding = new float[] { 1.0f, 0.0f, 0.0f };
+        var resultsWithoutScores = await _database.SearchSimilarAsync(queryEmbedding, 3);
+        var resultsWithScores = await _database.SearchSimilarWithScoresAsync(queryEmbedding, 3);
+
+        // Assert
+        Assert.Equal(resultsWithoutScores.Count, resultsWithScores.Count);
+        for (int i = 0; i < resultsWithoutScores.Count; i++)
+        {
+            Assert.Equal(resultsWithoutScores[i].MemberName, resultsWithScores[i].Chunk.MemberName);
+        }
+    }
+
+    /// <summary>
+    /// Tests that chunks with identical embeddings are all returned.
+    /// </summary>
+    [Fact]
+    public async Task SearchSimilarAsync_IdenticalEmbeddings_ReturnsAll()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        var chunks = new List<CodeChunk>
+        {
+            CreateTestChunk("Method1", new float[] { 1.0f, 0.0f, 0.0f }),
+            CreateTestChunk("Method2", new float[] { 1.0f, 0.0f, 0.0f }),
+            CreateTestChunk("Method3", new float[] { 1.0f, 0.0f, 0.0f })
+        };
+        await _database.InsertChunksAsync(chunks);
+
+        // Act
+        var queryEmbedding = new float[] { 1.0f, 0.0f, 0.0f };
+        var results = await _database.SearchSimilarAsync(queryEmbedding, 5);
+
+        // Assert
+        Assert.Equal(3, results.Count);
+        // All should have perfect or near-perfect similarity
+        var resultsWithScores = await _database.SearchSimilarWithScoresAsync(queryEmbedding, 5);
+        Assert.All(resultsWithScores, r => Assert.True(r.Similarity > 0.99f,
+            $"Expected similarity ~1.0 for identical embeddings, but got {r.Similarity:F4}"));
+    }
     {
         var chunk = new CodeChunk
         {
