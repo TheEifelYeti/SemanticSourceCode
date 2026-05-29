@@ -212,8 +212,35 @@ public class SqliteVssDatabaseTests : IDisposable
     }
 
     /// <summary>
-    /// Tests that empty query embeddings are handled correctly.
+    /// Tests that a semantically unrelated query ("Airplane") returns no meaningful results
+    /// when searching against code-related chunks. The similarity scores should be very low.
     /// </summary>
+    [Fact]
+    public async Task SearchSimilarWithScoresAsync_SemanticallyUnrelatedQuery_ReturnsLowScores()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        
+        // Create code-related chunks with embeddings pointing in one direction
+        var codeChunks = new List<CodeChunk>
+        {
+            CreateTestChunk("GetUserById", new float[] { 0.9f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("SaveToDatabase", new float[] { 0.8f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("ProcessRequest", new float[] { 0.85f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("ValidateInput", new float[] { 0.7f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f })
+        };
+        await _database.InsertChunksAsync(codeChunks);
+
+        // Act - Search with an embedding pointing in a completely different direction (simulating "Airplane")
+        var airplaneQueryEmbedding = new float[] { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.1f, 0.0f };
+        var results = await _database.SearchSimilarWithScoresAsync(airplaneQueryEmbedding, 5);
+
+        // Assert - Either no results, or all scores should be very low (< 0.3)
+        // indicating semantic irrelevance
+        Assert.True(results.Count == 0 || results.All(r => r.Similarity < 0.3f),
+            $"Expected no results or very low similarity scores for unrelated query, but got: " +
+            $"{string.Join(", ", results.Select(r => $"{r.Chunk.MemberName}={r.Similarity:F4}"))}");
+    }
     [Fact]
     public async Task SearchSimilarAsync_EmptyDatabase_ReturnsEmptyList()
     {
