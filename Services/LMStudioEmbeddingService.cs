@@ -156,6 +156,19 @@ public class LMStudioEmbeddingService : IEmbeddingService
             {
                 var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
                 _logger?.LogError("LM Studio returned HTTP {StatusCode}: {ErrorBody}", response.StatusCode, errorBody);
+                
+                if (errorBody.Contains("No models loaded"))
+                {
+                    throw new HttpRequestException(
+                        $"LM Studio API error: {response.StatusCode} - {errorBody}\n\n" +
+                        "The model is detected but LM Studio cannot use it for embeddings.\n" +
+                        "Possible solutions:\n" +
+                        "1. Ensure the loaded model supports embeddings (e.g., jina-embeddings, nomic-embed-text)\n" +
+                        "2. Try reloading the model in LM Studio Developer page\n" +
+                        "3. Update LM Studio to the latest version\n" +
+                        "4. Use Ollama instead for embeddings: set 'Embedding:Provider' to 'ollama'");
+                }
+                
                 throw new HttpRequestException($"LM Studio API error: {response.StatusCode} - {errorBody}");
             }
 
