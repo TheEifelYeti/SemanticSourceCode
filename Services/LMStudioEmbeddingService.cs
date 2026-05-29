@@ -59,8 +59,47 @@ public class LMStudioEmbeddingService : IEmbeddingService
             var responseText = await response.Content.ReadAsStringAsync();
             _logger?.LogDebug("LM Studio /v1/models response: {Response}", responseText);
             
+            // Try to parse as OpenAI-compatible format
             var modelsResponse = JsonSerializer.Deserialize<ModelsResponse>(responseText);
-            var loadedModels = modelsResponse?.Data?.Select(m => m.Id).ToList() ?? new List<string>();
+            var loadedModels = modelsResponse?.Data?.Select(m => m.Id).Where(id => !string.IsNullOrEmpty(id)).ToList() ?? new List<string>();
+            
+            _logger?.LogDebug("Parsed {Count} models from response", loadedModels.Count);
+            
+            if (loadedModels.Count == 0)
+            {
+                // LM Studio might return a different format - try raw JSON parsing
+                try
+                {
+                    var doc = JsonDocument.Parse(responseText);
+                    if (doc.RootElement.TryGetProperty("data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var item in dataElement.EnumerateArray())
+                        {
+                            if (item.TryGetProperty("id", out var idElement))
+                            {
+                                var id = idElement.GetString();
+                                if (!string.IsNullOrEmpty(id))
+                                {
+                                    loadedModels.Add(id);
+                                }
+                            }
+                            // Try alternative property names
+                            else if (item.TryGetProperty("model", out var modelElement))
+                            {
+                                var model = modelElement.GetString();
+                                if (!string.IsNullOrEmpty(model))
+                                {
+                                    loadedModels.Add(model);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "Failed to parse models response with fallback method");
+                }
+            }
             
             if (loadedModels.Count == 0)
             {
@@ -103,6 +142,7 @@ public class LMStudioEmbeddingService : IEmbeddingService
         try
         {
             _logger?.LogDebug("Sending embedding request to LM Studio for text: {TextPreview}", text[..Math.Min(text.Length, 100)]);
+            _logger?.LogDebug("Using model: {Model}", _embeddingModel);
             
             var request = new
             {
