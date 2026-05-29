@@ -25,7 +25,7 @@ public class OllamaEmbeddingService : IEmbeddingService
     {
         _logger = logger;
         var baseUrl = configuration["Ollama:BaseUrl"] ?? "http://localhost:11434";
-        _embeddingModel = configuration["Ollama:EmbeddingModel"] ?? "nomic-embed-text";
+        var configuredModel = configuration["Ollama:EmbeddingModel"] ?? "nomic-embed-text";
         
         _httpClient = new HttpClient
         {
@@ -33,7 +33,89 @@ public class OllamaEmbeddingService : IEmbeddingService
             Timeout = TimeSpan.FromMinutes(5)
         };
         
+        // Verify model availability and auto-select fallback
+        _embeddingModel = VerifyAndSelectModelAsync(configuredModel).GetAwaiter().GetResult();
+        
         _logger?.LogInformation("Ollama embedding service initialized with model: {Model}", _embeddingModel);
+    }
+
+    /// <summary>
+    /// Checks if the configured model exists. If not, tries to find a suitable embedding model.
+    /// </summary>
+    private async Task<string> VerifyAndSelectModelAsync(string configuredModel)
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync("/api/tags");
+            response.EnsureSuccessStatusCode();
+            
+            var result = await response.Content.ReadFromJsonAsync<OllamaTagsResponse>();
+            var availableModels = result?.Models?.Select(m => m.Name).ToList() ?? new List<string>();
+            
+            _logger?.LogDebug("Available Ollama models: {Models}", string.Join(", ", availableModels));
+            
+            // Check if configured model exists (exact match OR starts with configured model + ":")
+            var exactMatch = availableModels.FirstOrDefault(m => m.Equals(configuredModel, StringComparison.OrdinalIgnoreCase));
+            if (exactMatch != null)
+            {
+                _logger?.LogInformation("Using configured model: {Model}", exactMatch);
+                return exactMatch;
+            }
+            
+            // Check if configured model WITHOUT tag exists (e.g. "nomic-embed-text" matches "nomic-embed-text:latest")
+            var configuredBase = configuredModel.Contains(":") ? configuredModel.Split(":")[0] : configuredModel;
+            var tagMatch = availableModels.FirstOrDefault(m => {
+                var modelBase = m.Contains(":") ? m.Split(":")[0] : m;
+                return modelBase.Equals(configuredBase, StringComparison.OrdinalIgnoreCase);
+            });
+            if (tagMatch != null)
+            {
+                _logger?.LogInformation("Using model with matching base name: {Model} (configured: {Configured})", tagMatch, configuredModel);
+                return tagMatch;
+            }
+            
+            _logger?.LogWarning("Configured model '{ConfiguredModel}' not found. Looking for alternative...", configuredModel);
+            
+            // Try known embedding models
+            var embeddingModels = new[] { "nomic-embed-text", "mxbai-embed-large", "all-minilm", "bge-m3", "snowflake-arctic-embed" };
+            foreach (var model in embeddingModels)
+            {
+                if (availableModels.Any(m => m.Equals(model, StringComparison.OrdinalIgnoreCase) || 
+                                              m.StartsWith(model + ":", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var foundModel = availableModels.First(m => m.Equals(model, StringComparison.OrdinalIgnoreCase) || 
+                                                                 m.StartsWith(model + ":", StringComparison.OrdinalIgnoreCase));
+                    _logger?.LogInformation("Auto-selected alternative embedding model: {Model}", foundModel);
+                    return foundModel;
+                }
+            }
+            
+            // If no embedding model found, throw with helpful message
+            var message = $"Ollama embedding model not found. Configured: '{configuredModel}'. " +
+                          $"Available models: {string.Join(", ", availableModels)}. " +
+                          $"Please install an embedding model with: ollama pull nomic-embed-text";
+            _logger?.LogError(message);
+            throw new InvalidOperationException(message);
+        }
+        catch (HttpRequestException ex)
+        {
+            var message = $"Cannot connect to Ollama at {_httpClient.BaseAddress}. " +
+                          $"Please ensure Ollama is running. Error: {ex.Message}";
+            _logger?.LogError(message);
+            throw new InvalidOperationException(message, ex);
+        }
+    }
+
+    private class OllamaTagsResponse
+    {
+        [JsonPropertyName("models")]
+        public List<OllamaModel>? Models { get; set; }
+    }
+
+    private class OllamaModel
+    {
+        [JsonPropertyName("name")]
+        public string? Name { get; set; }
     }
 
     /// <inheritdoc />

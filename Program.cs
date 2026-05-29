@@ -176,21 +176,22 @@ class Program
             try
             {
                 var queryEmbedding = await embeddingService.GenerateEmbeddingAsync(query);
-                var results = await database.SearchSimilarAsync(queryEmbedding, topK: 5);
+                var resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: 5);
 
-                if (results.Count == 0)
+                if (resultsWithScores.Count == 0)
                 {
                     Console.WriteLine("No results found.");
                     continue;
                 }
 
-                Console.WriteLine($"\nFound {results.Count} results:");
+                Console.WriteLine($"\nFound {resultsWithScores.Count} results:");
                 Console.WriteLine(new string('=', 80));
 
-                for (int i = 0; i < results.Count; i++)
+                for (int i = 0; i < resultsWithScores.Count; i++)
                 {
-                    var result = results[i];
+                    var (result, score) = resultsWithScores[i];
                     Console.WriteLine($"\n{i + 1}. {result.NamespaceName}.{result.ClassName}.{result.MemberName}");
+                    Console.WriteLine($"   Similarity: {score:F4}");
                     Console.WriteLine($"   Type: {result.MemberType}");
                     Console.WriteLine($"   File: {result.FilePath} (lines {result.StartLine}-{result.EndLine})");
                     Console.WriteLine($"   Signature: {result.Signature.Split('\n')[0]}");

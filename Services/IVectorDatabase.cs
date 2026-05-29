@@ -38,8 +38,13 @@ public interface IVectorDatabase
     /// </summary>
     /// <param name="queryEmbedding">The embedding vector to search for.</param>
     /// <param name="topK">The maximum number of results to return. Default is 5.</param>
-    /// <returns>A list of the most similar code chunks, ordered by similarity (highest first).</returns>
+    /// <returns>A list of the most similar code chunks with their similarity scores, ordered by similarity (highest first).</returns>
     /// <exception cref="InvalidOperationException">Thrown when the database has not been initialized.</exception>
+    Task<List<(CodeChunk Chunk, float Similarity)>> SearchSimilarWithScoresAsync(float[] queryEmbedding, int topK = 5);
+
+    /// <summary>
+    /// Searches for code chunks similar to the query embedding (without scores).
+    /// </summary>
     Task<List<CodeChunk>> SearchSimilarAsync(float[] queryEmbedding, int topK = 5);
 
     /// <summary>

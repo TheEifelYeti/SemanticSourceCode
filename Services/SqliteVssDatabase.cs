@@ -95,7 +95,7 @@ public class SqliteVssDatabase : IVectorDatabase
         }
     }
 
-    public async Task<List<CodeChunk>> SearchSimilarAsync(float[] queryEmbedding, int topK = 5)
+    public async Task<List<(CodeChunk Chunk, float Similarity)>> SearchSimilarWithScoresAsync(float[] queryEmbedding, int topK = 5)
     {
         await EnsureInitializedAsync();
 
@@ -110,8 +110,7 @@ public class SqliteVssDatabase : IVectorDatabase
         await connection.OpenAsync();
 
         // Fetch all chunks and calculate cosine similarity in memory
-        // For production, consider using a proper vector database like Qdrant or SQLite-vss extension
-        var selectCmd = "SELECT * FROM CodeChunks WHERE Embedding IS NOT NULL";
+        var selectCmd = "SELECT * FROM CodeChunks WHERE Embedding IS NOT NULL AND LENGTH(Embedding) > 0";
         using var command = new SqliteCommand(selectCmd, connection);
         
         var results = new List<(CodeChunk Chunk, float Similarity)>();
@@ -144,12 +143,18 @@ public class SqliteVssDatabase : IVectorDatabase
             results.Add((chunk, similarity));
         }
 
-        // Return top K results
+        // Return top K results ordered by similarity
         return results
             .OrderByDescending(r => r.Similarity)
             .Take(topK)
-            .Select(r => r.Chunk)
+            .Select(r => (r.Chunk, r.Similarity))
             .ToList();
+    }
+
+    public async Task<List<CodeChunk>> SearchSimilarAsync(float[] queryEmbedding, int topK = 5)
+    {
+        var results = await SearchSimilarWithScoresAsync(queryEmbedding, topK);
+        return results.Select(r => r.Chunk).ToList();
     }
 
     public async Task ClearDatabaseAsync()
