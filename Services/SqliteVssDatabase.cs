@@ -99,6 +99,12 @@ public class SqliteVssDatabase : IVectorDatabase
     {
         await EnsureInitializedAsync();
 
+        if (queryEmbedding == null || queryEmbedding.Length == 0)
+        {
+            _logger?.LogError("Search called with empty query embedding. Is the embedding service running?");
+            throw new InvalidOperationException("Query embedding is empty. Check if Ollama/LM Studio is running and the model is loaded.");
+        }
+
         var connectionString = $"Data Source={_dbPath};";
         using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync();

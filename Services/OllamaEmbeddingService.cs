@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -52,17 +53,26 @@ public class OllamaEmbeddingService : IEmbeddingService
 
         try
         {
+            _logger?.LogDebug("Sending embedding request to Ollama for text: {TextPreview}", text[..Math.Min(text.Length, 100)]);
+            
             var response = await _httpClient.PostAsJsonAsync("/api/embeddings", request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger?.LogError("Ollama returned HTTP {StatusCode}: {ErrorBody}", response.StatusCode, errorBody);
+                throw new HttpRequestException($"Ollama API error: {response.StatusCode} - {errorBody}");
+            }
             
             var result = await response.Content.ReadFromJsonAsync<OllamaEmbeddingResponse>(cancellationToken);
             
             if (result?.Embedding == null)
             {
-                _logger?.LogError("No embedding returned from Ollama");
-                return Array.Empty<float>();
+                _logger?.LogError("No embedding returned from Ollama. Response: {Response}", JsonSerializer.Serialize(result));
+                throw new InvalidOperationException("Ollama returned empty embedding");
             }
 
+            _logger?.LogDebug("Generated embedding with {Dimensions} dimensions", result.Embedding.Length);
             return result.Embedding;
         }
         catch (TaskCanceledException)
@@ -70,10 +80,10 @@ public class OllamaEmbeddingService : IEmbeddingService
             _logger?.LogWarning("Embedding generation was cancelled");
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not InvalidOperationException and not HttpRequestException)
         {
             _logger?.LogError(ex, "Failed to generate embedding for text");
-            return Array.Empty<float>();
+            throw;
         }
     }
 
