@@ -48,7 +48,7 @@ public class LMStudioEmbeddingService : IEmbeddingService
 
         try
         {
-            _logger?.LogDebug("Generating embedding for text of length {Length}", text.Length);
+            _logger?.LogDebug("Sending embedding request to LM Studio for text: {TextPreview}", text[..Math.Min(text.Length, 100)]);
             
             var request = new
             {
@@ -57,14 +57,20 @@ public class LMStudioEmbeddingService : IEmbeddingService
             };
 
             var response = await _httpClient.PostAsJsonAsync("/v1/embeddings", request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger?.LogError("LM Studio returned HTTP {StatusCode}: {ErrorBody}", response.StatusCode, errorBody);
+                throw new HttpRequestException($"LM Studio API error: {response.StatusCode} - {errorBody}");
+            }
 
             var result = await response.Content.ReadFromJsonAsync<EmbeddingResponse>(cancellationToken);
             
             if (result?.Data?.FirstOrDefault()?.Embedding is not { } embedding)
             {
-                _logger?.LogError("Failed to parse embedding response from LM Studio");
-                return Array.Empty<float>();
+                _logger?.LogError("Failed to parse embedding response from LM Studio. Response: {Response}", JsonSerializer.Serialize(result));
+                throw new InvalidOperationException("LM Studio returned empty or invalid embedding");
             }
 
             _logger?.LogDebug("Successfully generated embedding with {Dimension} dimensions", embedding.Length);
@@ -75,10 +81,10 @@ public class LMStudioEmbeddingService : IEmbeddingService
             _logger?.LogWarning("Embedding generation was cancelled or timed out");
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not InvalidOperationException and not HttpRequestException)
         {
             _logger?.LogError(ex, "Failed to generate embedding for text");
-            return Array.Empty<float>();
+            throw;
         }
     }
 

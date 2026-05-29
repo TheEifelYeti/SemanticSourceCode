@@ -121,6 +121,13 @@ class Program
             try
             {
                 var embedding = await embeddingService.GenerateEmbeddingAsync(chunk.Content);
+                
+                if (embedding == null || embedding.Length == 0)
+                {
+                    Console.WriteLine($"WARNING: Empty embedding for {chunk.FilePath} - {chunk.MemberName}. Skipping.");
+                    continue;
+                }
+                
                 chunk.Embedding = ConvertFloatArrayToByteArray(embedding);
                 await database.InsertChunkAsync(chunk);
                 

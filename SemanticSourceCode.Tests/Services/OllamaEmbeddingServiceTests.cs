@@ -88,20 +88,19 @@ public class OllamaEmbeddingServiceTests
     }
 
     /// <summary>
-    /// Tests that GenerateEmbeddingsAsync returns empty arrays when Ollama is not available.
+    /// Tests that GenerateEmbeddingsAsync throws when Ollama is not available.
+    /// The service now propagates errors instead of silently returning empty arrays.
     /// </summary>
     [Fact]
-    public async Task GenerateEmbeddingsAsync_OllamaNotAvailable_ReturnsEmptyArrays()
+    public async Task GenerateEmbeddingsAsync_OllamaNotAvailable_ThrowsException()
     {
         // Arrange
         var service = new OllamaEmbeddingService(_configuration);
         var texts = new[] { "Hello", "World", "Test" };
 
-        // Act
-        var results = await service.GenerateEmbeddingsAsync(texts);
-
-        // Assert - when Ollama is not available, returns empty arrays
-        Assert.Equal(3, results.Length);
+        // Act & Assert - when Ollama is not available, should throw with useful error
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => service.GenerateEmbeddingsAsync(texts));
+        Assert.Contains("Ollama API error", ex.Message);
     }
 
     /// <summary>
