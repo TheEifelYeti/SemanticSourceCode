@@ -6,6 +6,7 @@ namespace SemanticSourceCode.Services;
 /// <summary>
 /// Factory for creating embedding service instances based on configuration.
 /// Supports multiple embedding providers: Ollama and LM Studio.
+/// Uses exactly the configured provider without fallback.
 /// </summary>
 public class EmbeddingServiceFactory
 {
@@ -25,6 +26,7 @@ public class EmbeddingServiceFactory
 
     /// <summary>
     /// Creates an embedding service based on the configured provider.
+    /// Uses exactly the configured provider without fallback.
     /// </summary>
     /// <returns>An instance of IEmbeddingService.</returns>
     /// <exception cref="InvalidOperationException">Thrown when the configured provider is not supported.</exception>

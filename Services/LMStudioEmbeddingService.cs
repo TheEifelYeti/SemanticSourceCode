@@ -13,11 +13,12 @@ namespace SemanticSourceCode.Services;
 public class LMStudioEmbeddingService : IEmbeddingService
 {
     private readonly HttpClient _httpClient;
-    private readonly string _embeddingModel;
+    private string _embeddingModel;
     private readonly ILogger<LMStudioEmbeddingService>? _logger;
 
     /// <summary>
     /// Initializes a new instance of the LM Studio embedding service.
+    /// Verifies that LM Studio is running and a model is loaded.
     /// </summary>
     /// <param name="configuration">Application configuration containing LM Studio settings.</param>
     /// <param name="logger">Optional logger for operation tracking.</param>
@@ -26,7 +27,7 @@ public class LMStudioEmbeddingService : IEmbeddingService
         _logger = logger;
         
         var baseUrl = configuration["LMStudio:BaseUrl"] ?? "http://localhost:1234";
-        _embeddingModel = configuration["LMStudio:EmbeddingModel"] ?? "text-embedding-nomic-embed-text-v1.5";
+        _embeddingModel = configuration["LMStudio:EmbeddingModel"] ?? "";
         
         _httpClient = new HttpClient
         {
@@ -34,7 +35,55 @@ public class LMStudioEmbeddingService : IEmbeddingService
             Timeout = TimeSpan.FromSeconds(30)
         };
         
+        // Verify LM Studio is running and has a model loaded
+        VerifyModelLoadedAsync().GetAwaiter().GetResult();
+        
         _logger?.LogInformation("LM Studio embedding service initialized with model: {Model}", _embeddingModel);
+    }
+
+    /// <summary>
+    /// Verifies that LM Studio is running and has a model loaded.
+    /// Tries to auto-detect the loaded model if none is configured.
+    /// </summary>
+    private async Task VerifyModelLoadedAsync()
+    {
+        try
+        {
+            // Check if LM Studio is running
+            var response = await _httpClient.GetAsync("/v1/models");
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new HttpRequestException($"LM Studio is not responding. Status: {response.StatusCode}");
+            }
+            
+            var modelsResponse = await response.Content.ReadFromJsonAsync<ModelsResponse>();
+            var loadedModels = modelsResponse?.Data?.Select(m => m.Id).ToList() ?? new List<string>();
+            
+            if (loadedModels.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "LM Studio has no models loaded. Please load a model in the developer page or use the 'lms load' command.");
+            }
+            
+            _logger?.LogInformation("LM Studio has {Count} model(s) loaded: {Models}", loadedModels.Count, string.Join(", ", loadedModels));
+            
+            // If no model configured, use the first loaded model
+            if (string.IsNullOrEmpty(_embeddingModel))
+            {
+                _embeddingModel = loadedModels.First();
+                _logger?.LogInformation("Auto-selected model: {Model}", _embeddingModel);
+            }
+            else if (!loadedModels.Any(m => m.Equals(_embeddingModel, StringComparison.OrdinalIgnoreCase)))
+            {
+                _logger?.LogWarning("Configured model '{Configured}' not found. Loaded models: {Loaded}. Using first loaded model.",
+                    _embeddingModel, string.Join(", ", loadedModels));
+                _embeddingModel = loadedModels.First();
+            }
+        }
+        catch (Exception ex) when (ex is not InvalidOperationException)
+        {
+            throw new InvalidOperationException("Failed to connect to LM Studio. Please ensure LM Studio is running and the server is started.", ex);
+        }
     }
 
     /// <inheritdoc />
@@ -144,6 +193,30 @@ public class LMStudioEmbeddingService : IEmbeddingService
         
         [JsonPropertyName("index")]
         public int Index { get; set; }
+    }
+
+    /// <summary>
+    /// Response model for LM Studio models listing API.
+    /// </summary>
+    private class ModelsResponse
+    {
+        [JsonPropertyName("object")]
+        public string? Object { get; set; }
+        
+        [JsonPropertyName("data")]
+        public List<ModelInfo>? Data { get; set; }
+    }
+
+    /// <summary>
+    /// Model information from LM Studio.
+    /// </summary>
+    private class ModelInfo
+    {
+        [JsonPropertyName("id")]
+        public string? Id { get; set; }
+        
+        [JsonPropertyName("object")]
+        public string? Object { get; set; }
     }
 
     /// <summary>
