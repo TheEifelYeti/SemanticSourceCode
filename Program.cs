@@ -72,7 +72,7 @@ class Program
                 }
                 else if (subMode == "search")
                 {
-                    await RunSearchMode(serviceProvider);
+                    await RunSearchMode(serviceProvider, configuration);
                 }
                 else
                 {
@@ -146,7 +146,7 @@ class Program
         Console.WriteLine($"Successfully indexed {processed} code chunks.");
     }
 
-    static async Task RunSearchMode(IServiceProvider services)
+    static async Task RunSearchMode(IServiceProvider services, IConfiguration configuration)
     {
         Console.WriteLine("Semantic Code Search");
         Console.WriteLine("====================");
@@ -176,20 +176,30 @@ class Program
             try
             {
                 var queryEmbedding = await embeddingService.GenerateEmbeddingAsync(query);
-                var resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: 5);
+                
+                // Get minimum similarity threshold from config (default: 0.85)
+                var minSimilarity = configuration.GetValue<float>("Search:MinimumSimilarity", 0.85f);
+                var resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: 20);
+                
+                // Filter by minimum similarity
+                var filteredResults = resultsWithScores
+                    .Where(r => r.Similarity >= minSimilarity)
+                    .Take(5)
+                    .ToList();
 
-                if (resultsWithScores.Count == 0)
+                if (filteredResults.Count == 0)
                 {
-                    Console.WriteLine("No results found.");
+                    Console.WriteLine($"No results found with similarity >= {minSimilarity:F2}.");
+                    Console.WriteLine($"Tip: Try a more specific query related to code (e.g., 'database connection', 'async method').");
                     continue;
                 }
 
-                Console.WriteLine($"\nFound {resultsWithScores.Count} results:");
+                Console.WriteLine($"\nFound {filteredResults.Count} results (filtered by similarity >= {minSimilarity:F2}):");
                 Console.WriteLine(new string('=', 80));
 
-                for (int i = 0; i < resultsWithScores.Count; i++)
+                for (int i = 0; i < filteredResults.Count; i++)
                 {
-                    var (result, score) = resultsWithScores[i];
+                    var (result, score) = filteredResults[i];
                     Console.WriteLine($"\n{i + 1}. {result.NamespaceName}.{result.ClassName}.{result.MemberName}");
                     Console.WriteLine($"   Similarity: {score:F4}");
                     Console.WriteLine($"   Type: {result.MemberType}");
