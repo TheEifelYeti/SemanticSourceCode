@@ -13,8 +13,21 @@ Ein C# Tool für semantische Code-Suche mit lokalem Ollama Embedding.
 
 ### Voraussetzungen
 
-- .NET 8.0 SDK
+- .NET 10.0 SDK
 - Ollama (lokal installiert)
+
+### .NET 10 installieren
+
+```bash
+# Installation via dotnet-install Script
+curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin --channel 10.0 --install-dir ~/.dotnet
+
+# PATH setzen
+export PATH="$HOME/.dotnet:$PATH"
+
+# Version prüfen
+dotnet --version  # 10.0.x
+```
 
 ### Ollama Einrichtung
 
@@ -31,6 +44,7 @@ ollama pull nomic-embed-text
 ```bash
 dotnet restore
 dotnet build
+dotnet test        # 26 Tests sollten durchlaufen
 dotnet publish -c Release
 ```
 
