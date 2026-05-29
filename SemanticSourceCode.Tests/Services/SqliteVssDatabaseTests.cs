@@ -212,6 +212,42 @@ public class SqliteVssDatabaseTests : IDisposable
     }
 
     /// <summary>
+    /// Tests that empty query embeddings are handled correctly.
+    /// </summary>
+    [Fact]
+    public async Task SearchSimilarAsync_EmptyDatabase_ReturnsEmptyList()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+
+        // Act
+        var queryEmbedding = new float[] { 1.0f, 0.0f, 0.0f };
+        var results = await _database.SearchSimilarAsync(queryEmbedding, 5);
+
+        // Assert
+        Assert.Empty(results);
+    }
+
+    /// <summary>
+    /// Tests that InitializeAsync is idempotent (can be called multiple times).
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_MultipleCalls_DoesNotThrow()
+    {
+        // Act
+        await _database.InitializeAsync();
+        await _database.InitializeAsync(); // Second call
+        await _database.InitializeAsync(); // Third call
+
+        // Assert
+        Assert.True(await _database.IsInitializedAsync());
+    }
+
+    // ============================================================================
+    // Semantic Search Tests
+    // ============================================================================
+
+    /// <summary>
     /// Tests that a semantically unrelated query ("Airplane") returns no meaningful results
     /// when searching against code-related chunks. The similarity scores should be very low.
     /// </summary>
@@ -240,34 +276,6 @@ public class SqliteVssDatabaseTests : IDisposable
         Assert.True(results.Count == 0 || results.All(r => r.Similarity < 0.3f),
             $"Expected no results or very low similarity scores for unrelated query, but got: " +
             $"{string.Join(", ", results.Select(r => $"{r.Chunk.MemberName}={r.Similarity:F4}"))}");
-    }
-    [Fact]
-    public async Task SearchSimilarAsync_EmptyDatabase_ReturnsEmptyList()
-    {
-        // Arrange
-        await _database.InitializeAsync();
-
-        // Act
-        var queryEmbedding = new float[] { 1.0f, 0.0f, 0.0f };
-        var results = await _database.SearchSimilarAsync(queryEmbedding, 5);
-
-        // Assert
-        Assert.Empty(results);
-    }
-
-    /// <summary>
-    /// Tests that InitializeAsync is idempotent (can be called multiple times).
-    /// </summary>
-    [Fact]
-    public async Task InitializeAsync_MultipleCalls_DoesNotThrow()
-    {
-        // Act
-        await _database.InitializeAsync();
-        await _database.InitializeAsync(); // Second call
-        await _database.InitializeAsync(); // Third call
-
-        // Assert
-        Assert.True(await _database.IsInitializedAsync());
     }
 
     /// <summary>
@@ -455,6 +463,12 @@ public class SqliteVssDatabaseTests : IDisposable
         Assert.All(resultsWithScores, r => Assert.True(r.Similarity > 0.99f,
             $"Expected similarity ~1.0 for identical embeddings, but got {r.Similarity:F4}"));
     }
+
+    // ============================================================================
+    // Helper Methods
+    // ============================================================================
+
+    private CodeChunk CreateTestChunk(string memberName, float[]? embedding = null, string? id = null)
     {
         var chunk = new CodeChunk
         {
