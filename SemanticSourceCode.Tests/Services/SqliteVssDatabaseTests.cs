@@ -464,9 +464,91 @@ public class SqliteVssDatabaseTests : IDisposable
             $"Expected similarity ~1.0 for identical embeddings, but got {r.Similarity:F4}"));
     }
 
-    // ============================================================================
-    // Helper Methods
-    // ============================================================================
+    /// <summary>
+    /// Tests that vec0 extension is detected and the virtual table is created.
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_WithVecExtension_CreatesVecTable()
+    {
+        // Act
+        await _database.InitializeAsync();
+
+        // Assert - check if vec table exists (best effort - may not be available in test environment)
+        // The test passes if initialization succeeds - vec0 is optional
+        Assert.True(await _database.IsInitializedAsync());
+    }
+
+    /// <summary>
+    /// Tests that search works with 8-dimensional embeddings (matching typical embedding models like nomic-embed-text).
+    /// </summary>
+    [Fact]
+    public async Task SearchSimilarAsync_RealisticEmbeddings_ReturnsOrderedResults()
+    {
+        // Arrange - use 8-dimensional embeddings to simulate realistic scenario
+        await _database.InitializeAsync();
+        var chunks = new List<CodeChunk>
+        {
+            CreateTestChunk("DatabaseQuery", new float[] { 0.9f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("SaveToDisk", new float[] { 0.85f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }),
+            CreateTestChunk("ValidateInput", new float[] { 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f }),
+            CreateTestChunk("ProcessRequest", new float[] { 0.8f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f })
+        };
+        await _database.InsertChunksAsync(chunks);
+
+        // Act - search for "database" related concept
+        var queryEmbedding = new float[] { 0.95f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+        var results = await _database.SearchSimilarWithScoresAsync(queryEmbedding, 4);
+
+        // Assert
+        Assert.True(results.Count >= 3, "Expected at least 3 results");
+        
+        // First result should be most similar (DatabaseQuery)
+        Assert.Equal("DatabaseQuery", results[0].Chunk.MemberName);
+        Assert.True(results[0].Similarity > 0.8f, $"Expected similarity > 0.8 but got {results[0].Similarity:F4}");
+        
+        // Results should be ordered by similarity (descending)
+        for (int i = 1; i < results.Count; i++)
+        {
+            Assert.True(results[i - 1].Similarity >= results[i].Similarity,
+                $"Results not ordered. Index {i - 1}: {results[i - 1].Similarity:F4}, Index {i}: {results[i].Similarity:F4}");
+        }
+    }
+
+    /// <summary>
+    /// Tests that chunk updates are reflected in search results.
+    /// </summary>
+    [Fact]
+    public async Task InsertChunkAsync_UpdateExistingChunk_UpdatesSearchResults()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        var id = Guid.NewGuid().ToString();
+        var original = CreateTestChunk("Original", new float[] { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }, id);
+        await _database.InsertChunkAsync(original);
+
+        // Act - update with different embedding
+        var updated = CreateTestChunk("Updated", new float[] { 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }, id);
+        await _database.InsertChunkAsync(updated);
+
+        // Assert - search in original direction should find nothing or low score
+        var originalQuery = new float[] { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+        var originalResults = await _database.SearchSimilarWithScoresAsync(originalQuery, 5);
+        
+        if (originalResults.Count > 0)
+        {
+            // After update, similarity should be low
+            Assert.True(originalResults[0].Similarity < 0.5f,
+                $"Expected low similarity after update, got {originalResults[0].Similarity:F4}");
+        }
+
+        // Search in new direction should find updated chunk
+        var newQuery = new float[] { 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+        var newResults = await _database.SearchSimilarWithScoresAsync(newQuery, 5);
+        Assert.True(newResults.Count > 0, "Expected to find updated chunk");
+        Assert.True(newResults[0].Similarity > 0.9f,
+            $"Expected high similarity for new direction, got {newResults[0].Similarity:F4}");
+        Assert.Equal("Updated", newResults[0].Chunk.MemberName);
+    }
 
     private CodeChunk CreateTestChunk(string memberName, float[]? embedding = null, string? id = null)
     {

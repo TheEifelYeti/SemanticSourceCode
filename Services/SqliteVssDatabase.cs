@@ -11,6 +11,8 @@ public class SqliteVssDatabase : IVectorDatabase
     private readonly string _dbPath;
     private readonly ILogger<SqliteVssDatabase>? _logger;
     private bool _isInitialized = false;
+    private bool _vecLoaded = false;
+    private int? _embeddingDimensions;
 
     public SqliteVssDatabase(IConfiguration configuration, ILogger<SqliteVssDatabase>? logger = null)
     {
@@ -25,6 +27,9 @@ public class SqliteVssDatabase : IVectorDatabase
         var connectionString = $"Data Source={_dbPath};";
         using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync();
+
+        // Try to load sqlite-vec extension for vector search
+        await TryLoadVecExtensionAsync(connection);
 
         // Create table for code chunks
         var createTableCmd = @"
@@ -65,8 +70,62 @@ public class SqliteVssDatabase : IVectorDatabase
         using var command = new SqliteCommand(createTableCmd, connection);
         await command.ExecuteNonQueryAsync();
 
+        // Create vec0 virtual table for ANN vector search if extension loaded
+        if (_vecLoaded)
+        {
+            await CreateVecVirtualTableAsync(connection);
+        }
+
         _isInitialized = true;
-        _logger?.LogInformation("Database initialized at {Path}", _dbPath);
+        _logger?.LogInformation("Database initialized at {Path} (vec0: {VecStatus})", _dbPath, _vecLoaded ? "enabled" : "fallback");
+    }
+
+    private async Task TryLoadVecExtensionAsync(SqliteConnection connection)
+    {
+        try
+        {
+            // Enable extension loading
+            using var enableCmd = new SqliteCommand("SELECT load_extension('vec0')", connection);
+            await enableCmd.ExecuteNonQueryAsync();
+            _vecLoaded = true;
+            _logger?.LogInformation("sqlite-vec extension loaded successfully");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not load sqlite-vec extension: {Message}. Falling back to in-memory cosine similarity.", ex.Message);
+            _vecLoaded = false;
+        }
+    }
+
+    private async Task CreateVecVirtualTableAsync(SqliteConnection connection)
+    {
+        try
+        {
+            // Drop existing vec table if schema changed
+            var dropCmd = "DROP TABLE IF EXISTS vec_embeddings;";
+            using (var cmd = new SqliteCommand(dropCmd, connection))
+            {
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            // Create vec0 virtual table - dimension will be set on first insert
+            var createVecCmd = @"
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
+                    embedding FLOAT[768] distance_metric=cosine,
+                    chunk_id TEXT
+                );
+            ";
+            using (var cmd = new SqliteCommand(createVecCmd, connection))
+            {
+                await cmd.ExecuteNonQueryAsync();
+            }
+            _logger?.LogInformation("vec0 virtual table created for ANN search");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to create vec0 virtual table: {Message}", ex.Message);
+            _vecLoaded = false;
+        }
     }
 
     public async Task InsertChunkAsync(CodeChunk chunk)
@@ -98,6 +157,79 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@IndexedAt", chunk.IndexedAt.ToString("O"));
 
         await command.ExecuteNonQueryAsync();
+
+        // Also insert into vec0 virtual table for ANN search
+        if (_vecLoaded && chunk.Embedding != null && chunk.Embedding.Length > 0)
+        {
+            await InsertVecEmbeddingAsync(connection, chunk);
+        }
+    }
+
+    private async Task InsertVecEmbeddingAsync(SqliteConnection connection, CodeChunk chunk)
+    {
+        try
+        {
+            var embeddingFloats = ConvertByteArrayToFloatArray(chunk.Embedding!);
+            
+            // Detect embedding dimensions from first chunk
+            if (_embeddingDimensions == null)
+            {
+                _embeddingDimensions = embeddingFloats.Length;
+                _logger?.LogInformation("Detected embedding dimensions: {Dimensions}", _embeddingDimensions);
+                
+                // Recreate vec table with correct dimensions
+                await RecreateVecTableWithDimensionsAsync(connection, _embeddingDimensions.Value);
+            }
+
+            // Convert floats to JSON array for vec0
+            var embeddingJson = "[" + string.Join(",", embeddingFloats.Select(f => f.ToString("G9", CultureInfo.InvariantCulture))) + "]";
+            
+            var insertVecCmd = @"
+                INSERT INTO vec_embeddings (embedding, chunk_id) 
+                VALUES (json(?), ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET embedding = json(?);";
+
+            using var command = new SqliteCommand(insertVecCmd, connection);
+            command.Parameters.AddWithValue("@embedding", embeddingJson);
+            command.Parameters.AddWithValue("@chunk_id", chunk.Id);
+            command.Parameters.AddWithValue("@embedding_update", embeddingJson);
+            
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to insert vec embedding for chunk {ChunkId}: {Message}", chunk.Id, ex.Message);
+        }
+    }
+
+    private async Task RecreateVecTableWithDimensionsAsync(SqliteConnection connection, int dimensions)
+    {
+        try
+        {
+            var dropCmd = "DROP TABLE IF EXISTS vec_embeddings;";
+            using (var cmd = new SqliteCommand(dropCmd, connection))
+            {
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            var createCmd = $@"
+                CREATE VIRTUAL TABLE vec_embeddings USING vec0(
+                    embedding FLOAT[{dimensions}] distance_metric=cosine,
+                    chunk_id TEXT
+                );";
+            
+            using (var cmd = new SqliteCommand(createCmd, connection))
+            {
+                await cmd.ExecuteNonQueryAsync();
+            }
+            
+            _logger?.LogInformation("Recreated vec_embeddings table with {Dimensions} dimensions", dimensions);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to recreate vec table: {Message}. Disabling vec0.", ex.Message);
+            _vecLoaded = false;
+        }
     }
 
     public async Task InsertChunksAsync(IEnumerable<CodeChunk> chunks)
@@ -118,11 +250,63 @@ public class SqliteVssDatabase : IVectorDatabase
             throw new InvalidOperationException("Query embedding is empty. Check if Ollama/LM Studio is running and the model is loaded.");
         }
 
+        // Use sqlite-vec ANN search if available
+        if (_vecLoaded && _embeddingDimensions.HasValue && queryEmbedding.Length == _embeddingDimensions.Value)
+        {
+            return await SearchWithVecAsync(queryEmbedding, topK);
+        }
+
+        // Fallback: in-memory cosine similarity
+        return await SearchWithCosineFallbackAsync(queryEmbedding, topK);
+    }
+
+    private async Task<List<(CodeChunk Chunk, float Similarity)>> SearchWithVecAsync(float[] queryEmbedding, int topK)
+    {
         var connectionString = $"Data Source={_dbPath};";
         using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync();
 
-        // Fetch all chunks and calculate cosine similarity in memory
+        var embeddingJson = "[" + string.Join(",", queryEmbedding.Select(f => f.ToString("G9", CultureInfo.InvariantCulture))) + "]";
+        
+        // vec0 uses MATCH operator with KNN
+        var selectCmd = $@"
+            SELECT 
+                c.*,
+                vec_distance_cosine(v.embedding, json(?)) as distance
+            FROM vec_embeddings v
+            JOIN CodeChunks c ON v.chunk_id = c.Id
+            WHERE v.embedding MATCH json(?)
+            ORDER BY distance
+            LIMIT {topK};";
+
+        using var command = new SqliteCommand(selectCmd, connection);
+        command.Parameters.AddWithValue("@query", embeddingJson);
+        command.Parameters.AddWithValue("@match", embeddingJson);
+
+        var results = new List<(CodeChunk Chunk, float Similarity)>();
+        
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var distance = reader.GetDouble(13); // distance column after all CodeChunks columns
+            var similarity = (float)(1.0 - distance); // Convert cosine distance to similarity
+            
+            var chunk = ReadChunkFromReader(reader);
+            results.Add((chunk, similarity));
+        }
+
+        _logger?.LogDebug("vec0 search returned {Count} results", results.Count);
+        return results;
+    }
+
+    private async Task<List<(CodeChunk Chunk, float Similarity)>> SearchWithCosineFallbackAsync(float[] queryEmbedding, int topK)
+    {
+        _logger?.LogDebug("Using in-memory cosine similarity fallback");
+        
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
         var selectCmd = "SELECT * FROM CodeChunks WHERE Embedding IS NOT NULL AND LENGTH(Embedding) > 0";
         using var command = new SqliteCommand(selectCmd, connection);
         
@@ -137,26 +321,11 @@ public class SqliteVssDatabase : IVectorDatabase
             var chunkEmbedding = ConvertByteArrayToFloatArray(embeddingBytes);
             var similarity = CosineSimilarity(queryEmbedding, chunkEmbedding);
             
-            var chunk = new CodeChunk
-            {
-                Id = reader.GetString(0),
-                FilePath = reader.GetString(1),
-                NamespaceName = reader.GetString(2),
-                ClassName = reader.GetString(3),
-                MemberName = reader.GetString(4),
-                MemberType = reader.GetString(5),
-                Content = reader.GetString(6),
-                Signature = reader.GetString(7),
-                Documentation = reader.GetString(8),
-                StartLine = reader.GetInt32(9),
-                EndLine = reader.GetInt32(10),
-                IndexedAt = DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
-            };
+            var chunk = ReadChunkFromReader(reader);
             
             results.Add((chunk, similarity));
         }
 
-        // Return top K results ordered by similarity
         return results
             .OrderByDescending(r => r.Similarity)
             .Take(topK)
@@ -355,22 +524,22 @@ public class SqliteVssDatabase : IVectorDatabase
         return results;
     }
 
-    private CodeChunk ReadChunkFromReader(SqliteDataReader reader)
+    private CodeChunk ReadChunkFromReader(SqliteDataReader reader, int offset = 0)
     {
         return new CodeChunk
         {
-            Id = reader.GetString(0),
-            FilePath = reader.GetString(1),
-            NamespaceName = reader.GetString(2),
-            ClassName = reader.GetString(3),
-            MemberName = reader.GetString(4),
-            MemberType = reader.GetString(5),
-            Content = reader.GetString(6),
-            Signature = reader.GetString(7),
-            Documentation = reader.GetString(8),
-            StartLine = reader.GetInt32(9),
-            EndLine = reader.GetInt32(10),
-            IndexedAt = DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
+            Id = reader.GetString(0 + offset),
+            FilePath = reader.GetString(1 + offset),
+            NamespaceName = reader.GetString(2 + offset),
+            ClassName = reader.GetString(3 + offset),
+            MemberName = reader.GetString(4 + offset),
+            MemberType = reader.GetString(5 + offset),
+            Content = reader.GetString(6 + offset),
+            Signature = reader.GetString(7 + offset),
+            Documentation = reader.GetString(8 + offset),
+            StartLine = reader.GetInt32(9 + offset),
+            EndLine = reader.GetInt32(10 + offset),
+            IndexedAt = DateTime.Parse(reader.GetString(12 + offset), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
         };
     }
 }

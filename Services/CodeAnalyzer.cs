@@ -56,7 +56,7 @@ public class CodeAnalyzer : ICodeAnalyzer
                 // Analyze methods
                 foreach (var method in classDecl.Members.OfType<MethodDeclarationSyntax>())
                 {
-                    var chunk = CreateMethodChunk(filePath, namespaceName, className, method, classDocumentation, lines);
+                    var chunk = CreateMethodChunk(filePath, namespaceName, className, method, classDocumentation, lines, isController, isService, isMiddleware);
                     
                     // Apply framework metadata
                     chunk.IsController = isController;
@@ -74,7 +74,7 @@ public class CodeAnalyzer : ICodeAnalyzer
                 // Analyze properties
                 foreach (var property in classDecl.Members.OfType<PropertyDeclarationSyntax>())
                 {
-                    var chunk = CreatePropertyChunk(filePath, namespaceName, className, property, classDocumentation, lines);
+                    var chunk = CreatePropertyChunk(filePath, namespaceName, className, property, classDocumentation, lines, isController, isService, isMiddleware);
                     chunk.IsController = isController;
                     chunk.IsService = isService;
                     chunks.Add(chunk);
@@ -83,7 +83,7 @@ public class CodeAnalyzer : ICodeAnalyzer
                 // Analyze constructors
                 foreach (var ctor in classDecl.Members.OfType<ConstructorDeclarationSyntax>())
                 {
-                    var chunk = CreateConstructorChunk(filePath, namespaceName, className, ctor, classDocumentation, lines);
+                    var chunk = CreateConstructorChunk(filePath, namespaceName, className, ctor, classDocumentation, lines, isController, isService, isMiddleware);
                     chunk.IsService = isService;
                     chunk.CallsTo = ExtractCallTargets(ctor);
                     chunks.Add(chunk);
@@ -92,7 +92,7 @@ public class CodeAnalyzer : ICodeAnalyzer
                 // Analyze fields
                 foreach (var field in classDecl.Members.OfType<FieldDeclarationSyntax>())
                 {
-                    var chunk = CreateFieldChunk(filePath, namespaceName, className, field, classDocumentation, lines);
+                    var chunk = CreateFieldChunk(filePath, namespaceName, className, field, classDocumentation, lines, isController, isService, isMiddleware);
                     chunks.Add(chunk);
                 }
             }
@@ -318,7 +318,7 @@ public class CodeAnalyzer : ICodeAnalyzer
     #endregion
 
     private CodeChunk CreateMethodChunk(string filePath, string namespaceName, string className, 
-        MethodDeclarationSyntax method, string classDocumentation, string[] lines)
+        MethodDeclarationSyntax method, string classDocumentation, string[] lines, bool isController, bool isService, bool isMiddleware)
     {
         var documentation = GetDocumentation(method);
         var signature = method.ToString().Split('\n')[0];
@@ -327,6 +327,9 @@ public class CodeAnalyzer : ICodeAnalyzer
 
         var content = BuildContent(new[] { classDocumentation, documentation, signature, method.Body?.ToString() ?? method.ExpressionBody?.ToString() ?? "" });
 
+        // Boost für bessere Suchergebnisse
+        var boostedContent = BoostContent(content, className, method.Identifier.Text, isController, isService, isMiddleware);
+
         return new CodeChunk
         {
             FilePath = filePath,
@@ -334,7 +337,7 @@ public class CodeAnalyzer : ICodeAnalyzer
             ClassName = className,
             MemberName = method.Identifier.Text,
             MemberType = "Method",
-            Content = content,
+            Content = boostedContent,  // <-- Geboosteter Content
             Signature = signature,
             Documentation = documentation,
             StartLine = startLine,
@@ -343,7 +346,7 @@ public class CodeAnalyzer : ICodeAnalyzer
     }
 
     private CodeChunk CreatePropertyChunk(string filePath, string namespaceName, string className,
-        PropertyDeclarationSyntax property, string classDocumentation, string[] lines)
+        PropertyDeclarationSyntax property, string classDocumentation, string[] lines, bool isController, bool isService, bool isMiddleware)
     {
         var documentation = GetDocumentation(property);
         var signature = property.ToString();
@@ -352,6 +355,9 @@ public class CodeAnalyzer : ICodeAnalyzer
 
         var content = BuildContent(new[] { classDocumentation, documentation, signature });
 
+        // Boost für bessere Suchergebnisse
+        var boostedContent = BoostContent(content, className, property.Identifier.Text, isController, isService, isMiddleware);
+
         return new CodeChunk
         {
             FilePath = filePath,
@@ -359,7 +365,7 @@ public class CodeAnalyzer : ICodeAnalyzer
             ClassName = className,
             MemberName = property.Identifier.Text,
             MemberType = "Property",
-            Content = content,
+            Content = boostedContent,  // <-- Geboosteter Content
             Signature = signature,
             Documentation = documentation,
             StartLine = startLine,
@@ -368,7 +374,7 @@ public class CodeAnalyzer : ICodeAnalyzer
     }
 
     private CodeChunk CreateConstructorChunk(string filePath, string namespaceName, string className,
-        ConstructorDeclarationSyntax ctor, string classDocumentation, string[] lines)
+        ConstructorDeclarationSyntax ctor, string classDocumentation, string[] lines, bool isController, bool isService, bool isMiddleware)
     {
         var documentation = GetDocumentation(ctor);
         var signature = ctor.ToString().Split('\n')[0];
@@ -377,6 +383,9 @@ public class CodeAnalyzer : ICodeAnalyzer
 
         var content = BuildContent(new[] { classDocumentation, documentation, signature, ctor.Body?.ToString() ?? ctor.ExpressionBody?.ToString() ?? "" });
 
+        // Boost für bessere Suchergebnisse
+        var boostedContent = BoostContent(content, className, ctor.Identifier.Text, isController, isService, isMiddleware);
+
         return new CodeChunk
         {
             FilePath = filePath,
@@ -384,7 +393,7 @@ public class CodeAnalyzer : ICodeAnalyzer
             ClassName = className,
             MemberName = ctor.Identifier.Text,
             MemberType = "Constructor",
-            Content = content,
+            Content = boostedContent,  // <-- Geboosteter Content
             Signature = signature,
             Documentation = documentation,
             StartLine = startLine,
@@ -393,7 +402,7 @@ public class CodeAnalyzer : ICodeAnalyzer
     }
 
     private CodeChunk CreateFieldChunk(string filePath, string namespaceName, string className,
-        FieldDeclarationSyntax field, string classDocumentation, string[] lines)
+        FieldDeclarationSyntax field, string classDocumentation, string[] lines, bool isController, bool isService, bool isMiddleware)
     {
         var documentation = GetDocumentation(field);
         var signature = field.ToString();
@@ -402,7 +411,10 @@ public class CodeAnalyzer : ICodeAnalyzer
 
         var content = BuildContent(new[] { classDocumentation, documentation, signature });
 
+        // Boost für bessere Suchergebnisse
         var variable = field.Declaration.Variables.First();
+        var boostedContent = BoostContent(content, className, variable.Identifier.Text, isController, isService, isMiddleware);
+
         return new CodeChunk
         {
             FilePath = filePath,
@@ -410,7 +422,7 @@ public class CodeAnalyzer : ICodeAnalyzer
             ClassName = className,
             MemberName = variable.Identifier.Text,
             MemberType = "Field",
-            Content = content,
+            Content = boostedContent,  // <-- Geboosteter Content
             Signature = signature,
             Documentation = documentation,
             StartLine = startLine,
@@ -444,5 +456,26 @@ public class CodeAnalyzer : ICodeAnalyzer
             }
         }
         return sb.ToString().Trim();
+    }
+
+    /// <summary>
+    /// Boostet den Content mit Schlüsselwörtern für bessere semantische Suche.
+    /// </summary>
+    private string BoostContent(string content, string className, string memberName, bool isController, bool isService, bool isMiddleware)
+    {
+        var sb = new StringBuilder(content);
+        
+        // Klassenname boosten (2x)
+        sb.AppendLine($"[CLASS_BOOST] {className} {className}");
+        
+        // Membername boosten (3x)
+        sb.AppendLine($"[MEMBER_BOOST] {memberName} {memberName} {memberName}");
+        
+        // Framework-Typen boosten
+        if (isController) sb.AppendLine("[FRAMEWORK] controller api http");
+        if (isService) sb.AppendLine("[FRAMEWORK] service business logic");
+        if (isMiddleware) sb.AppendLine("[FRAMEWORK] middleware pipeline");
+        
+        return sb.ToString();
     }
 }

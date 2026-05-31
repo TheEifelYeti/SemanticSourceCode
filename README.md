@@ -9,6 +9,9 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 💾 **SQLite Vector Database** — Simple embedded database with cosine similarity search
 - 🔎 **Semantic Search** — Find code based on meaning, not just keywords
 - ⚡ **Multiple Providers** — Switch between Ollama and LM Studio via configuration
+- 🚀 **Enhanced Search Quality** — Content boosting and query expansion for better results
+- 🏷️ **Framework Detection** — Automatic detection of ASP.NET Controllers, Services and Middleware
+- 📊 **Call Graph Analysis** — Track method calls and dependencies between code chunks
 
 ## Installation
 
@@ -170,6 +173,28 @@ Each C# class is split into separate chunks:
 - **Properties** — Including getter/setter logic
 - **Constructors** — Separate initialization logic
 - **Fields** — With type and initialization
+
+### Search Quality Enhancements
+
+To improve search quality, the tool implements several techniques:
+
+#### Content Boosting
+
+Each code chunk is enhanced with additional metadata to improve search relevance:
+
+- **Class Name Boosting** — Class names are repeated to increase their weight
+- **Member Name Boosting** — Member names are emphasized for better matching
+- **Framework Metadata** — Framework-specific terms are added for ASP.NET components
+
+#### Query Expansion
+
+Search queries are automatically expanded with synonyms and related terms:
+
+- `db` → `database`, `data base`, `sql`, `entity framework`
+- `http` → `web`, `api`, `rest`, `endpoint`
+- `async` → `asynchronous`, `task`, `background`
+- `sensor` → `ultrasonic`, `distance`, `color`, `gyro`
+- `file` → `io`, `read`, `write`, `stream`
 
 ### Embedding Providers
 

@@ -6,7 +6,7 @@ using SemanticSourceCode.Services;
 
 namespace SemanticSourceCode;
 
-class Program
+public class Program
 {
     static async Task Main(string[] args)
     {
@@ -171,11 +171,13 @@ class Program
             if (string.IsNullOrWhiteSpace(query) || query.ToLowerInvariant() == "quit")
                 break;
 
-            Console.WriteLine("Searching...");
+            // Query erweitern
+            var expandedQuery = ExpandQuery(query);
+            Console.WriteLine($"Searching for: {expandedQuery}");
             
             try
             {
-                var queryEmbedding = await embeddingService.GenerateEmbeddingAsync(query);
+                var queryEmbedding = await embeddingService.GenerateEmbeddingAsync(expandedQuery);
                 
                 // Get minimum similarity threshold from config (default: 0.70)
                 var minSimilarity = configuration.GetValue<float>("Search:MinimumSimilarity", 0.70f);
@@ -260,6 +262,33 @@ class Program
         Console.WriteLine("  SemanticSourceCode --mode index --path ./src");
         Console.WriteLine("  SemanticSourceCode --mode index --path /home/user/projects/MyApp");
         Console.WriteLine("  SemanticSourceCode --mode search");
+    }
+
+    public static string ExpandQuery(string query)
+    {
+        var expansions = new Dictionary<string, string[]>
+        {
+            ["db"] = new[] { "database", "data base", "sql", "entity framework" },
+            ["http"] = new[] { "web", "api", "rest", "endpoint" },
+            ["async"] = new[] { "asynchronous", "task", "background" },
+            ["sensor"] = new[] { "ultrasonic", "distance", "color", "gyro" },
+            ["file"] = new[] { "io", "read", "write", "stream" }
+        };
+
+        var words = query.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                         .Select(w => w.ToLower())
+                         .ToArray();
+        var expanded = new List<string>(words);
+
+        foreach (var word in words)
+        {
+            if (expansions.TryGetValue(word, out var synonyms))
+            {
+                expanded.AddRange(synonyms);
+            }
+        }
+
+        return string.Join(" ", expanded.Distinct());
     }
 
     static byte[] ConvertFloatArrayToByteArray(float[] floats)
