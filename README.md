@@ -58,6 +58,41 @@ Default Ollama endpoint: `http://localhost:11434`
 
 Default LM Studio endpoint: `http://localhost:1234`
 
+## Auto-Detect Mode
+
+By default, the app uses **auto-detect** — you don't need to configure anything.
+
+Just set:
+
+```json
+{
+  "Embedding": {
+    "Provider": "auto"
+  }
+}
+```
+
+The app will automatically:
+1. **Check LM Studio first** (faster, local UI) — port 1234
+2. **Fall back to Ollama** — port 11434
+3. **Pick whichever is available** with a loaded embedding model
+
+### Why Auto-Detect?
+
+- **Zero-config out-of-the-box** — Install either LM Studio or Ollama, the app just works
+- **Respects explicit choice** — Set `"ollama"` or `"lmstudio"` to pin a provider (fallback still works if that one is down)
+- **Transparent logging** — The console tells you exactly which provider was chosen and why
+
+### Fallback Behavior
+
+| Config | First Try | Fallback |
+|--------|-----------|----------|
+| `auto` | LM Studio | Ollama |
+| `lmstudio` | LM Studio | Ollama |
+| `ollama` | Ollama | LM Studio |
+
+If neither provider is reachable, you'll get a clear error with installation instructions for both.
+
 ### Build
 
 ```bash
@@ -94,9 +129,30 @@ Example queries:
 
 ## Configuration
 
-Edit `appsettings.json` to switch providers:
+Edit `appsettings.json` to switch providers. Use `"auto"` (default) for zero-config behavior, or explicitly pin a provider.
 
-### Use Ollama (default)
+### Auto-Detect (default — recommended)
+
+```json
+{
+  "Embedding": {
+    "Provider": "auto"
+  },
+  "Ollama": {
+    "BaseUrl": "http://localhost:11434",
+    "EmbeddingModel": "nomic-embed-text"
+  },
+  "LMStudio": {
+    "BaseUrl": "http://localhost:1234",
+    "EmbeddingModel": "text-embedding-nomic-embed-text-v1.5"
+  },
+  "Database": {
+    "Path": "codechunks.db"
+  }
+}
+```
+
+### Use Ollama (explicit)
 
 ```json
 {
@@ -113,7 +169,7 @@ Edit `appsettings.json` to switch providers:
 }
 ```
 
-### Use LM Studio
+### Use LM Studio (explicit)
 
 ```json
 {
@@ -134,7 +190,7 @@ Edit `appsettings.json` to switch providers:
 
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
-| `Embedding` | `Provider` | `ollama` | Provider: `ollama` or `lmstudio` |
+| `Embedding` | `Provider` | `auto` | Provider: `auto`, `ollama`, or `lmstudio` |
 | `Ollama` | `BaseUrl` | `http://localhost:11434` | Ollama API endpoint |
 | `Ollama` | `EmbeddingModel` | `nomic-embed-text` | Model name in Ollama |
 | `LMStudio` | `BaseUrl` | `http://localhost:1234` | LM Studio API endpoint |
@@ -219,6 +275,46 @@ similarity = (A · B) / (||A|| × ||B||)
 ```
 
 ## Troubleshooting
+
+### No embedding provider available
+
+If you see:
+
+```
+No embedding provider available.
+```
+
+Make sure at least one of these is running:
+
+**LM Studio:**
+1. Open LM Studio and go to the **Developer** tab
+2. Start the local server (toggle should be green)
+3. Load an embedding model (e.g. `nomic-embed-text-v1.5`)
+4. Verify: `curl http://localhost:1234/v1/models`
+
+**Ollama:**
+```bash
+# Pull an embedding model
+ollama pull nomic-embed-text
+
+# Ensure Ollama is running
+ollama serve
+
+# Verify
+curl http://localhost:11434/api/tags
+```
+
+The app is set to `auto` by default, so it will pick whichever is available.
+
+### LM Studio has no models loaded
+
+If you see:
+
+```
+LM Studio erreichbar, aber kein Modell geladen.
+```
+
+Go to the **Developer** tab in LM Studio, load an embedding model, and make sure the server is started.
 
 ### Ollama not reachable
 

@@ -20,12 +20,14 @@ public class Program
         var services = new ServiceCollection();
         services.AddSingleton<IConfiguration>(configuration);
         services.AddTransient<ICodeAnalyzer, CodeAnalyzer>();
+        // Register embedding service as a factory that resolves at first use (async)
         services.AddTransient<IEmbeddingService>(provider =>
         {
             var factory = new EmbeddingServiceFactory(
                 provider.GetRequiredService<IConfiguration>(),
                 provider.GetRequiredService<ILoggerFactory>());
-            return factory.CreateEmbeddingService();
+            // Async factory: fire-and-forget is not safe in DI; run synchronously
+            return factory.CreateEmbeddingServiceAsync().GetAwaiter().GetResult();
         });
         services.AddTransient<IVectorDatabase, SqliteVssDatabase>();
         

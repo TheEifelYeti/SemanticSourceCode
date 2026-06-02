@@ -23,22 +23,100 @@ public class LMStudioEmbeddingService : IEmbeddingService
     /// <param name="configuration">Application configuration containing LM Studio settings.</param>
     /// <param name="logger">Optional logger for operation tracking.</param>
     public LMStudioEmbeddingService(IConfiguration configuration, ILogger<LMStudioEmbeddingService>? logger = null)
+        : this(configuration, logger, new HttpClient())
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance with an externally provided HttpClient (for testing).
+    /// </summary>
+    public LMStudioEmbeddingService(IConfiguration configuration, ILogger<LMStudioEmbeddingService>? logger, HttpClient httpClient)
     {
         _logger = logger;
-        
+
         var baseUrl = configuration["LMStudio:BaseUrl"] ?? "http://localhost:1234";
         _embeddingModel = configuration["LMStudio:EmbeddingModel"] ?? "";
-        
-        _httpClient = new HttpClient
-        {
-            BaseAddress = new Uri(baseUrl),
-            Timeout = TimeSpan.FromSeconds(30)
-        };
-        
+
+        _httpClient = httpClient;
+        _httpClient.BaseAddress = new Uri(baseUrl);
+        _httpClient.Timeout = TimeSpan.FromSeconds(30);
+
         // Verify LM Studio is running and has a model loaded
         VerifyModelLoadedAsync().GetAwaiter().GetResult();
-        
+
         _logger?.LogInformation("LM Studio embedding service initialized with model: {Model}", _embeddingModel);
+    }
+
+    /// <summary>
+    /// Checks whether LM Studio is reachable and has a model loaded.
+    /// Returns a result tuple — does not throw.
+    /// </summary>
+    public static async Task<(bool IsRunning, bool HasModel, string? SelectedModel, string? ErrorMessage)> IsAvailableAsync(IConfiguration configuration, HttpClient? httpClient = null)
+    {
+        var baseUrl = configuration["LMStudio:BaseUrl"] ?? "http://localhost:1234";
+        var configuredModel = configuration["LMStudio:EmbeddingModel"] ?? "";
+
+        var client = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        client.BaseAddress = new Uri(baseUrl);
+
+        try
+        {
+            var response = await client.GetAsync("/v1/models");
+            if (!response.IsSuccessStatusCode)
+                return (false, false, null, $"LM Studio not responding. Status: {response.StatusCode}");
+
+            var responseText = await response.Content.ReadAsStringAsync();
+            var loadedModels = ExtractModelIds(responseText);
+
+            if (loadedModels.Count == 0)
+                return (true, false, null, "LM Studio erreichbar, aber kein Modell geladen. Bitte lade ein Embedding-Modell im Developer-Tab.");
+
+            var selectedModel = loadedModels.FirstOrDefault(m => m.Equals(configuredModel, StringComparison.OrdinalIgnoreCase))
+                                ?? loadedModels.First();
+
+            return (true, true, selectedModel, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, false, null, $"LM Studio nicht erreichbar: {ex.Message}");
+        }
+    }
+
+    private static List<string> ExtractModelIds(string responseText)
+    {
+        var loadedModels = new List<string>();
+        try
+        {
+            var modelsResponse = JsonSerializer.Deserialize<ModelsResponse>(responseText);
+            loadedModels = modelsResponse?.Data?.Select(m => m.Id).Where(id => !string.IsNullOrEmpty(id)).ToList() ?? new List<string>();
+        }
+        catch { /* ignore parsing error, try fallback */ }
+
+        if (loadedModels.Count == 0)
+        {
+            try
+            {
+                var doc = JsonDocument.Parse(responseText);
+                if (doc.RootElement.TryGetProperty("data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in dataElement.EnumerateArray())
+                    {
+                        if (item.TryGetProperty("id", out var idElement))
+                        {
+                            var id = idElement.GetString();
+                            if (!string.IsNullOrEmpty(id)) loadedModels.Add(id);
+                        }
+                        else if (item.TryGetProperty("model", out var modelElement))
+                        {
+                            var model = modelElement.GetString();
+                            if (!string.IsNullOrEmpty(model)) loadedModels.Add(model);
+                        }
+                    }
+                }
+            }
+            catch { /* ignore */ }
+        }
+        return loadedModels;
     }
 
     /// <summary>
@@ -47,87 +125,26 @@ public class LMStudioEmbeddingService : IEmbeddingService
     /// </summary>
     private async Task VerifyModelLoadedAsync()
     {
-        try
+        var (isRunning, hasModel, selectedModel, errorMessage) = await IsAvailableAsync(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LMStudio:BaseUrl"] = _httpClient.BaseAddress?.ToString(),
+                ["LMStudio:EmbeddingModel"] = _embeddingModel
+            }).Build(),
+            _httpClient);
+
+        if (!isRunning)
         {
-            // Check if LM Studio is running
-            var response = await _httpClient.GetAsync("/v1/models");
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new HttpRequestException($"LM Studio is not responding. Status: {response.StatusCode}");
-            }
-            
-            var responseText = await response.Content.ReadAsStringAsync();
-            _logger?.LogDebug("LM Studio /v1/models response: {Response}", responseText);
-            
-            // Try to parse as OpenAI-compatible format
-            var modelsResponse = JsonSerializer.Deserialize<ModelsResponse>(responseText);
-            var loadedModels = modelsResponse?.Data?.Select(m => m.Id).Where(id => !string.IsNullOrEmpty(id)).ToList() ?? new List<string>();
-            
-            _logger?.LogDebug("Parsed {Count} models from response", loadedModels.Count);
-            
-            if (loadedModels.Count == 0)
-            {
-                // LM Studio might return a different format - try raw JSON parsing
-                try
-                {
-                    var doc = JsonDocument.Parse(responseText);
-                    if (doc.RootElement.TryGetProperty("data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var item in dataElement.EnumerateArray())
-                        {
-                            if (item.TryGetProperty("id", out var idElement))
-                            {
-                                var id = idElement.GetString();
-                                if (!string.IsNullOrEmpty(id))
-                                {
-                                    loadedModels.Add(id);
-                                }
-                            }
-                            // Try alternative property names
-                            else if (item.TryGetProperty("model", out var modelElement))
-                            {
-                                var model = modelElement.GetString();
-                                if (!string.IsNullOrEmpty(model))
-                                {
-                                    loadedModels.Add(model);
-                                }
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning(ex, "Failed to parse models response with fallback method");
-                }
-            }
-            
-            if (loadedModels.Count == 0)
-            {
-                throw new InvalidOperationException(
-                    "LM Studio has no models loaded. Please load a model in the developer page or use the 'lms load' command.");
-            }
-            
-            _logger?.LogInformation("LM Studio has {Count} model(s) loaded: {Models}", loadedModels.Count, string.Join(", ", loadedModels));
-            
-            // Always use the first loaded model - LM Studio only supports one model at a time for embeddings
-            var selectedModel = loadedModels.First();
-            
-            if (!string.IsNullOrEmpty(_embeddingModel) && !loadedModels.Any(m => m.Equals(_embeddingModel, StringComparison.OrdinalIgnoreCase)))
-            {
-                _logger?.LogWarning("Configured model '{Configured}' not found. Loaded models: {Loaded}. Using: {Selected}",
-                    _embeddingModel, string.Join(", ", loadedModels), selectedModel);
-            }
-            else
-            {
-                _logger?.LogInformation("Using loaded model: {Model}", selectedModel);
-            }
-            
-            _embeddingModel = selectedModel;
+            throw new InvalidOperationException("Failed to connect to LM Studio. Please ensure LM Studio is running and the server is started.");
         }
-        catch (Exception ex) when (ex is not InvalidOperationException)
+
+        if (!hasModel)
         {
-            throw new InvalidOperationException("Failed to connect to LM Studio. Please ensure LM Studio is running and the server is started.", ex);
+            throw new InvalidOperationException(errorMessage ?? "LM Studio has no models loaded. Please load a model in the developer page or use the 'lms load' command.");
         }
+
+        _logger?.LogInformation("LM Studio has model(s) loaded. Using: {Model}", selectedModel);
+        _embeddingModel = selectedModel!;
     }
 
     /// <inheritdoc />
