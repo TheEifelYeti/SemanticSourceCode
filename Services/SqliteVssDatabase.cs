@@ -53,6 +53,21 @@ public class SqliteVssDatabase : IVectorDatabase
             CREATE INDEX IF NOT EXISTS idx_classname ON CodeChunks(ClassName);
             CREATE INDEX IF NOT EXISTS idx_membertype ON CodeChunks(MemberType);
 
+            -- Keyword index for hybrid search
+            -- Note: Using regular table instead of FTS5 for backward compatibility
+            -- (FTS5 may not be available in all SQLite builds)
+            CREATE TABLE IF NOT EXISTS KeywordIndex (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ChunkId TEXT NOT NULL,
+                Term TEXT NOT NULL,
+                Weight REAL NOT NULL DEFAULT 1.0,
+                IndexedAt TEXT NOT NULL,
+                FOREIGN KEY (ChunkId) REFERENCES CodeChunks(Id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_keyword_term ON KeywordIndex(Term);
+            CREATE INDEX IF NOT EXISTS idx_keyword_chunk ON KeywordIndex(ChunkId);
+
             CREATE TABLE IF NOT EXISTS CallEdges (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 SourceChunkId TEXT NOT NULL,

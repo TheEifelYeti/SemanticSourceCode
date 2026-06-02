@@ -36,4 +36,8 @@
     <None Remove="SemanticSourceCode.Tests\**" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="SemanticSourceCode.Tests" />
+  </ItemGroup>
+
 </Project>
