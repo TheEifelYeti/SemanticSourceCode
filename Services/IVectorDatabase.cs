@@ -1,4 +1,5 @@
 using SemanticSourceCode.Models;
+using SemanticSourceCode.Search;
 
 namespace SemanticSourceCode.Services;
 
@@ -43,9 +44,19 @@ public interface IVectorDatabase
     Task<List<(CodeChunk Chunk, float Similarity)>> SearchSimilarWithScoresAsync(float[] queryEmbedding, int topK = 5);
 
     /// <summary>
+    /// Searches for code chunks similar to the query embedding, optionally filtered by structural properties.
+    /// </summary>
+    Task<List<(CodeChunk Chunk, float Similarity)>> SearchSimilarWithScoresAsync(float[] queryEmbedding, SearchFilter filter, int topK = 5);
+
+    /// <summary>
     /// Searches for code chunks similar to the query embedding (without scores).
     /// </summary>
     Task<List<CodeChunk>> SearchSimilarAsync(float[] queryEmbedding, int topK = 5);
+
+    /// <summary>
+    /// Searches for code chunks similar to the query embedding, optionally filtered by structural properties (without scores).
+    /// </summary>
+    Task<List<CodeChunk>> SearchSimilarAsync(float[] queryEmbedding, SearchFilter filter, int topK = 5);
 
     /// <summary>
     /// Clears all data from the database.

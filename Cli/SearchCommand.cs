@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using SemanticSourceCode.Models;
 using SemanticSourceCode.Search;
 using SemanticSourceCode.Services;
 
@@ -8,7 +9,7 @@ namespace SemanticSourceCode.Cli;
 
 public static class SearchCommand
 {
-    public static async Task<int> RunAsync(IServiceProvider services, IConfiguration configuration, ILogger logger)
+    public static async Task<int> RunAsync(IServiceProvider services, IConfiguration configuration, ILogger logger, string[] args)
     {
         var embeddingService = services.GetRequiredService<IEmbeddingService>();
         var database = services.GetRequiredService<IVectorDatabase>();
@@ -23,6 +24,18 @@ public static class SearchCommand
         }
 
         var searchOptions = configuration.GetSection("Search").Get<SearchOptions>() ?? new SearchOptions();
+
+        // Parse filter arguments from CLI
+        var filter = ParseFilterFromArgs(args);
+        bool hasFilter = filter != null && !filter.IsEmpty;
+
+        // When filtering, we can use a larger topK to ensure enough results after filtering
+        int searchTopK = hasFilter ? Math.Max(searchOptions.TopK, 50) : searchOptions.TopK;
+
+        if (hasFilter)
+        {
+            Console.WriteLine($"Active filters: {DescribeFilter(filter!)}");
+        }
 
         Console.WriteLine("Semantic Code Search");
         Console.WriteLine("====================");
@@ -43,7 +56,16 @@ public static class SearchCommand
             {
                 var queryEmbedding = await embeddingService.GenerateEmbeddingAsync(expandedQuery);
 
-                var resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: searchOptions.TopK);
+                List<(CodeChunk Chunk, float Similarity)> resultsWithScores;
+
+                if (hasFilter)
+                {
+                    resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, filter!, topK: searchTopK);
+                }
+                else
+                {
+                    resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: searchTopK);
+                }
 
                 var filteredResults = resultsWithScores
                     .Where(r => r.Similarity >= searchOptions.MinimumSimilarity)
@@ -104,5 +126,36 @@ public static class SearchCommand
 
         Console.WriteLine("Goodbye!");
         return 0;
+    }
+
+    private static SearchFilter? ParseFilterFromArgs(string[] args)
+    {
+        var filter = new SearchFilter();
+        bool hasAny = false;
+
+        var ns = CliArguments.GetValue(args, "--namespace");
+        if (!string.IsNullOrWhiteSpace(ns)) { filter.Namespace = ns; hasAny = true; }
+
+        var className = CliArguments.GetValue(args, "--class");
+        if (!string.IsNullOrWhiteSpace(className)) { filter.ClassName = className; hasAny = true; }
+
+        var httpMethod = CliArguments.GetValue(args, "--http-method");
+        if (!string.IsNullOrWhiteSpace(httpMethod)) { filter.HttpMethod = httpMethod; hasAny = true; }
+
+        var filePattern = CliArguments.GetValue(args, "--file-pattern");
+        if (!string.IsNullOrWhiteSpace(filePattern)) { filter.FilePathPattern = filePattern; hasAny = true; }
+
+        if (hasAny) return filter;
+        return null;
+    }
+
+    private static string DescribeFilter(SearchFilter filter)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(filter.Namespace)) parts.Add($"namespace={filter.Namespace}");
+        if (!string.IsNullOrWhiteSpace(filter.ClassName)) parts.Add($"class={filter.ClassName}");
+        if (!string.IsNullOrWhiteSpace(filter.HttpMethod)) parts.Add($"http={filter.HttpMethod}");
+        if (!string.IsNullOrWhiteSpace(filter.FilePathPattern)) parts.Add($"file={filter.FilePathPattern}");
+        return string.Join(", ", parts);
     }
 }

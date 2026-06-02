@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SemanticSourceCode.Models;
+using SemanticSourceCode.Search;
 using System.Globalization;
 
 namespace SemanticSourceCode.Services;
@@ -46,12 +47,25 @@ public class SqliteVssDatabase : IVectorDatabase
                 StartLine INTEGER NOT NULL,
                 EndLine INTEGER NOT NULL,
                 Embedding BLOB,
-                IndexedAt TEXT NOT NULL
+                IndexedAt TEXT NOT NULL,
+                IsController INTEGER DEFAULT 0,
+                IsService INTEGER DEFAULT 0,
+                IsMiddleware INTEGER DEFAULT 0,
+                HttpMethods TEXT,
+                RouteTemplate TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_filepath ON CodeChunks(FilePath);
             CREATE INDEX IF NOT EXISTS idx_classname ON CodeChunks(ClassName);
             CREATE INDEX IF NOT EXISTS idx_membertype ON CodeChunks(MemberType);
+
+            -- Backward-compatible migration: add new columns if they don't exist
+            SELECT CASE WHEN EXISTS(SELECT 1 FROM pragma_table_info('CodeChunks') WHERE name = 'IsController') THEN 1 ELSE 0 END;
+            ALTER TABLE CodeChunks ADD COLUMN IsController INTEGER DEFAULT 0;
+            ALTER TABLE CodeChunks ADD COLUMN IsService INTEGER DEFAULT 0;
+            ALTER TABLE CodeChunks ADD COLUMN IsMiddleware INTEGER DEFAULT 0;
+            ALTER TABLE CodeChunks ADD COLUMN HttpMethods TEXT;
+            ALTER TABLE CodeChunks ADD COLUMN RouteTemplate TEXT;
 
             -- Keyword index for hybrid search
             -- Note: Using regular table instead of FTS5 for backward compatibility
@@ -85,10 +99,17 @@ public class SqliteVssDatabase : IVectorDatabase
         using var command = new SqliteCommand(createTableCmd, connection);
         await command.ExecuteNonQueryAsync();
 
+        // Backward-compatible migration: add new columns if they don't exist
+        await TryAddColumnAsync(connection, "CodeChunks", "IsController", "INTEGER DEFAULT 0");
+        await TryAddColumnAsync(connection, "CodeChunks", "IsService", "INTEGER DEFAULT 0");
+        await TryAddColumnAsync(connection, "CodeChunks", "IsMiddleware", "INTEGER DEFAULT 0");
+        await TryAddColumnAsync(connection, "CodeChunks", "HttpMethods", "TEXT");
+        await TryAddColumnAsync(connection, "CodeChunks", "RouteTemplate", "TEXT");
+
         // Create vec0 virtual table for ANN vector search if extension loaded
         if (_vecLoaded)
         {
-            await CreateVecVirtualTableAsync(connection);
+            await CreateVecVirtualTableAsync(connection, _embeddingDimensions);
         }
 
         _isInitialized = true;
@@ -112,7 +133,7 @@ public class SqliteVssDatabase : IVectorDatabase
         }
     }
 
-    private async Task CreateVecVirtualTableAsync(SqliteConnection connection)
+    private async Task CreateVecVirtualTableAsync(SqliteConnection connection, int? dimensions = null)
     {
         try
         {
@@ -123,10 +144,11 @@ public class SqliteVssDatabase : IVectorDatabase
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            // Create vec0 virtual table - dimension will be set on first insert
-            var createVecCmd = @"
+            // Create vec0 virtual table with dynamic dimensions
+            int dim = dimensions ?? 768;
+            var createVecCmd = $@"
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
-                    embedding FLOAT[768] distance_metric=cosine,
+                    embedding FLOAT[{dim}] distance_metric=cosine,
                     chunk_id TEXT
                 );
             ";
@@ -134,12 +156,25 @@ public class SqliteVssDatabase : IVectorDatabase
             {
                 await cmd.ExecuteNonQueryAsync();
             }
-            _logger?.LogInformation("vec0 virtual table created for ANN search");
+            _logger?.LogInformation("vec0 virtual table created for ANN search with {Dim} dimensions", dim);
         }
         catch (Exception ex)
         {
             _logger?.LogError("Failed to create vec0 virtual table: {Message}", ex.Message);
             _vecLoaded = false;
+        }
+    }
+
+    private async Task TryAddColumnAsync(SqliteConnection connection, string table, string column, string type)
+    {
+        try
+        {
+            using var cmd = new SqliteCommand($"ALTER TABLE {table} ADD COLUMN {column} {type};", connection);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1) // duplicate column name
+        {
+            // Column already exists — this is expected on subsequent runs
         }
     }
 
@@ -153,8 +188,8 @@ public class SqliteVssDatabase : IVectorDatabase
 
         var insertCmd = @"
             INSERT OR REPLACE INTO CodeChunks 
-            (Id, FilePath, NamespaceName, ClassName, MemberName, MemberType, Content, Signature, Documentation, StartLine, EndLine, Embedding, IndexedAt)
-            VALUES (@Id, @FilePath, @NamespaceName, @ClassName, @MemberName, @MemberType, @Content, @Signature, @Documentation, @StartLine, @EndLine, @Embedding, @IndexedAt)";
+            (Id, FilePath, NamespaceName, ClassName, MemberName, MemberType, Content, Signature, Documentation, StartLine, EndLine, Embedding, IndexedAt, IsController, IsService, IsMiddleware, HttpMethods, RouteTemplate)
+            VALUES (@Id, @FilePath, @NamespaceName, @ClassName, @MemberName, @MemberType, @Content, @Signature, @Documentation, @StartLine, @EndLine, @Embedding, @IndexedAt, @IsController, @IsService, @IsMiddleware, @HttpMethods, @RouteTemplate)";
 
         using var command = new SqliteCommand(insertCmd, connection);
         command.Parameters.AddWithValue("@Id", chunk.Id);
@@ -170,6 +205,11 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@EndLine", chunk.EndLine);
         command.Parameters.AddWithValue("@Embedding", chunk.Embedding ?? Array.Empty<byte>());
         command.Parameters.AddWithValue("@IndexedAt", chunk.IndexedAt.ToString("O"));
+        command.Parameters.AddWithValue("@IsController", chunk.IsController ? 1 : 0);
+        command.Parameters.AddWithValue("@IsService", chunk.IsService ? 1 : 0);
+        command.Parameters.AddWithValue("@IsMiddleware", chunk.IsMiddleware ? 1 : 0);
+        command.Parameters.AddWithValue("@HttpMethods", chunk.HttpMethods ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@RouteTemplate", chunk.RouteTemplate ?? (object)DBNull.Value);
 
         await command.ExecuteNonQueryAsync();
 
@@ -255,6 +295,69 @@ public class SqliteVssDatabase : IVectorDatabase
         }
     }
 
+    public async Task<List<(CodeChunk Chunk, float Similarity)>> SearchSimilarWithScoresAsync(float[] queryEmbedding, SearchFilter filter, int topK = 5)
+    {
+        var results = await SearchSimilarWithScoresAsync(queryEmbedding, topK * 3); // Get more for filtering
+        return ApplyFilter(results, filter).Take(topK).ToList();
+    }
+
+    public async Task<List<CodeChunk>> SearchSimilarAsync(float[] queryEmbedding, SearchFilter filter, int topK = 5)
+    {
+        var results = await SearchSimilarWithScoresAsync(queryEmbedding, filter, topK);
+        return results.Select(r => r.Chunk).ToList();
+    }
+
+    private List<(CodeChunk Chunk, float Similarity)> ApplyFilter(List<(CodeChunk Chunk, float Similarity)> results, SearchFilter filter)
+    {
+        var filtered = results.AsEnumerable();
+
+        if (!string.IsNullOrWhiteSpace(filter.Namespace))
+        {
+            filtered = filtered.Where(r => r.Chunk.NamespaceName.Contains(filter.Namespace, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filter.ClassName))
+        {
+            filtered = filtered.Where(r => r.Chunk.ClassName.Contains(filter.ClassName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filter.HttpMethod))
+        {
+            filtered = filtered.Where(r =>
+                r.Chunk.HttpMethods != null &&
+                r.Chunk.HttpMethods.Contains(filter.HttpMethod, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filter.FilePathPattern))
+        {
+            var pattern = filter.FilePathPattern.Replace("*", "").Replace("?", "");
+            filtered = filtered.Where(r => r.Chunk.FilePath.Contains(pattern, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filter.ChunkType))
+        {
+            filtered = filtered.Where(r =>
+                r.Chunk.MemberType.Equals(filter.ChunkType, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (filter.IsController.HasValue)
+        {
+            filtered = filtered.Where(r => r.Chunk.IsController == filter.IsController.Value);
+        }
+
+        if (filter.IsService.HasValue)
+        {
+            filtered = filtered.Where(r => r.Chunk.IsService == filter.IsService.Value);
+        }
+
+        if (filter.IsMiddleware.HasValue)
+        {
+            filtered = filtered.Where(r => r.Chunk.IsMiddleware == filter.IsMiddleware.Value);
+        }
+
+        return filtered.ToList();
+    }
+
     public async Task<List<(CodeChunk Chunk, float Similarity)>> SearchSimilarWithScoresAsync(float[] queryEmbedding, int topK = 5)
     {
         await EnsureInitializedAsync();
@@ -268,7 +371,15 @@ public class SqliteVssDatabase : IVectorDatabase
         // Use sqlite-vec ANN search if available
         if (_vecLoaded && _embeddingDimensions.HasValue && queryEmbedding.Length == _embeddingDimensions.Value)
         {
-            return await SearchWithVecAsync(queryEmbedding, topK);
+            try
+            {
+                return await SearchWithVecAsync(queryEmbedding, topK);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("vec0 search failed, falling back to cosine: {Message}", ex.Message);
+                // Fall through to fallback
+            }
         }
 
         // Fallback: in-memory cosine similarity
@@ -286,8 +397,8 @@ public class SqliteVssDatabase : IVectorDatabase
         // vec0 uses MATCH operator with KNN
         var selectCmd = $@"
             SELECT 
-                c.*,
-                vec_distance_cosine(v.embedding, json(?)) as distance
+                vec_distance_cosine(v.embedding, json(?)) as distance,
+                c.*
             FROM vec_embeddings v
             JOIN CodeChunks c ON v.chunk_id = c.Id
             WHERE v.embedding MATCH json(?)
@@ -303,10 +414,10 @@ public class SqliteVssDatabase : IVectorDatabase
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            var distance = reader.GetDouble(13); // distance column after all CodeChunks columns
+            var distance = reader.GetDouble(0); // distance is first column
             var similarity = (float)(1.0 - distance); // Convert cosine distance to similarity
             
-            var chunk = ReadChunkFromReader(reader);
+            var chunk = ReadChunkFromReader(reader, 1); // offset by 1 for distance column
             results.Add((chunk, similarity));
         }
 
@@ -541,7 +652,7 @@ public class SqliteVssDatabase : IVectorDatabase
 
     private CodeChunk ReadChunkFromReader(SqliteDataReader reader, int offset = 0)
     {
-        return new CodeChunk
+        var chunk = new CodeChunk
         {
             Id = reader.GetString(0 + offset),
             FilePath = reader.GetString(1 + offset),
@@ -556,5 +667,25 @@ public class SqliteVssDatabase : IVectorDatabase
             EndLine = reader.GetInt32(10 + offset),
             IndexedAt = DateTime.Parse(reader.GetString(12 + offset), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
         };
+
+        // Read optional columns that may not exist in older databases
+        // Use field count to determine available columns
+        var fieldCount = reader.FieldCount;
+        var expectedColumns = 13; // Original 13 columns (0-12)
+
+        if (fieldCount > expectedColumns)
+        {
+            chunk.IsController = reader.GetInt32(13 + offset) != 0;
+            chunk.IsService = reader.GetInt32(14 + offset) != 0;
+            chunk.IsMiddleware = reader.GetInt32(15 + offset) != 0;
+
+            var httpMethodsValue = reader.GetValue(16 + offset);
+            chunk.HttpMethods = httpMethodsValue == DBNull.Value ? null : (string?)httpMethodsValue;
+
+            var routeTemplateValue = reader.GetValue(17 + offset);
+            chunk.RouteTemplate = routeTemplateValue == DBNull.Value ? null : (string?)routeTemplateValue;
+        }
+
+        return chunk;
     }
 }

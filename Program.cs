@@ -76,7 +76,7 @@ public class Program
                 }
                 else if (subMode == "search")
                 {
-                    return await SearchCommand.RunAsync(serviceProvider, configuration, logger);
+                    return await SearchCommand.RunAsync(serviceProvider, configuration, logger, args);
                 }
                 else
                 {
