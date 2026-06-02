@@ -2,7 +2,12 @@
 
 A C# tool for semantic code search with local embeddings. Search your codebase by meaning, not just keywords.
 
-## Features
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
+![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
+![Tests](https://img.shields.io/badge/Tests-63%20passing-brightgreen.svg)
+![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
+
+## Highlights
 
 - 🔍 **Semantic Chunking** — Analyzes C# classes, methods, properties, constructors and fields separately
 - 🧠 **Local Embeddings** — Uses Ollama or LM Studio locally, no cloud dependency, no data leakage
@@ -13,7 +18,40 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 🏷️ **Framework Detection** — Automatic detection of ASP.NET Controllers, Services and Middleware
 - 📊 **Call Graph Analysis** — Track method calls and dependencies between code chunks
 
-## Installation
+## Architecture
+
+```
+┌─────────────────┐      ┌──────────────────┐
+│  C# Files       │ ───> │   CodeAnalyzer   │ (Roslyn)
+└─────────────────┘      └────────┬─────────┘
+                                 │ CodeChunks
+                                 v
+                        ┌──────────────────┐
+                        │ EmbeddingProvider│ (Ollama/LM Studio)
+                        └────────┬─────────┘
+                                 │ float[]
+                                 v
+                        ┌──────────────────┐
+                        │ SqliteVssDatabase│ (vec0)
+                        └────────┬─────────┘
+                                 │
+                                 v
+                        ┌──────────────────┐
+                        │ SearchEngine     │ (Cosine Sim)
+                        └──────────────────┘
+```
+
+| Komponente | Verantwortung | Datei |
+|------------|--------------|-------|
+| CodeAnalyzer | Roslyn-basierte Code-Zerlegung | Services/CodeAnalyzer.cs |
+| IEmbeddingService | Provider-Abstraktion | Services/IEmbeddingService.cs |
+| EmbeddingServiceFactory | Auto-Detect Provider | Services/EmbeddingServiceFactory.cs |
+| IVectorDatabase | Vektor-Storage mit Cosine Sim | Services/IVectorDatabase.cs |
+| SqliteVssDatabase | SQLite + vec0 Implementation | Services/SqliteVssDatabase.cs |
+| QueryExpander | Synonym-Erweiterung | Search/QueryExpander.cs |
+| CodeChunk | Datenmodell | Models/CodeChunk.cs |
+
+## Getting Started
 
 ### Prerequisites
 
@@ -98,7 +136,7 @@ If neither provider is reachable, you'll get a clear error with installation ins
 ```bash
 dotnet restore
 dotnet build
-dotnet test        # All 26 tests should pass
+dotnet test        # All 63 tests should pass
 dotnet publish -c Release
 ```
 
@@ -199,24 +237,18 @@ Edit `appsettings.json` to switch providers. Use `"auto"` (default) for zero-con
 | `Chunking` | `MaxChunkSize` | `1000` | Maximum tokens per chunk |
 | `Chunking` | `OverlapTokens` | `100` | Overlap between chunks |
 
-## Architecture
+### Query Expansion
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       Program.cs                             │
-│                     (CLI Interface)                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-           ┌──────────────────┼──────────────────┐
-           ▼                  ▼                  ▼
-┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
-│   CodeAnalyzer   │ │ EmbeddingService │ │SqliteVssDatabase │
-│   (Roslyn)       │ │   Factory        │ │   (SQLite)       │
-│                  │ │                  │ │                  │
-│ - Parse C#       │ │ - Ollama         │ │ - Store Chunks   │
-│ - Extract methods│ │ - LM Studio      │ │ - Cosine Search  │
-│ - Extract props  │ │ - OpenAI-compat. │ │ - Top-K Results  │
-└──────────────────┘ └──────────────────┘ └──────────────────┘
+Search queries are automatically expanded with synonyms and related terms. You can customize this in `appsettings.json`:
+
+```json
+{
+  "QueryExpansion": {
+    "db": "database,sql,entity framework",
+    "http": "web,api,rest,endpoint",
+    "async": "asynchronous,task,background"
+  }
+}
 ```
 
 ## Technical Details
@@ -246,7 +278,7 @@ Each code chunk is enhanced with additional metadata to improve search relevance
 
 Search queries are automatically expanded with synonyms and related terms:
 
-- `db` → `database`, `data base`, `sql`, `entity framework`
+- `db` → `database`, `sql`, `entity framework`
 - `http` → `web`, `api`, `rest`, `endpoint`
 - `async` → `asynchronous`, `task`, `background`
 - `sensor` → `ultrasonic`, `distance`, `color`, `gyro`
@@ -345,6 +377,14 @@ ollama serve
 - Embedding generation is CPU-intensive — expect slower performance on Raspberry Pi or low-power devices
 - The tool processes chunks sequentially (batch size: 1)
 - Consider using a machine with GPU support for faster embedding generation
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+- Report bugs via [GitHub Issues](https://github.com/YOUR_USERNAME/SemanticSourceCode/issues)
+- Request features via [GitHub Discussions](https://github.com/YOUR_USERNAME/SemanticSourceCode/discussions)
+- Submit pull requests following our PR template
 
 ## License
 
