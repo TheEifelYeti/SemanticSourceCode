@@ -8,6 +8,6 @@ public class RankerOptions
     public float ServiceBoost { get; set; } = 1.1f;
     public float MiddlewareBoost { get; set; } = 1.1f;
     public float DocumentationBoost { get; set; } = 1.05f;
-    public int SmallFileLineThreshold { get; set; } = 20;
+    public int SmallFileLineThreshold { get; set; } = 10;
     public float SmallFilePenalty { get; set; } = 0.9f;
 }
