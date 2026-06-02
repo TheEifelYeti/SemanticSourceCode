@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.Extensions.Logging;
 using SemanticSourceCode.Models;
 using System.Text;
 
@@ -8,6 +9,12 @@ namespace SemanticSourceCode.Services;
 
 public class CodeAnalyzer : ICodeAnalyzer
 {
+    private readonly ILogger<CodeAnalyzer> _logger;
+
+    public CodeAnalyzer(ILogger<CodeAnalyzer> logger)
+    {
+        _logger = logger;
+    }
     /// <summary>
     /// Detected ASP.NET patterns in the current project.
     /// </summary>
@@ -122,7 +129,7 @@ public class CodeAnalyzer : ICodeAnalyzer
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error analyzing {file}: {ex.Message}");
+                _logger.LogError(ex, "Error analyzing {File}: {Message}", file, ex.Message);
             }
         }
 

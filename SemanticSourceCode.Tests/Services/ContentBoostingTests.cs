@@ -5,6 +5,8 @@ using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.Extensions.Logging;
+using Moq;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Services;
 
@@ -14,10 +16,11 @@ public class ContentBoostingTests
 {
     private CodeAnalyzer _analyzer = null!;
     private MethodInfo? _boostContentMethod;
-    
+
     public ContentBoostingTests()
     {
-        _analyzer = new CodeAnalyzer();
+        var loggerMock = new Mock<ILogger<CodeAnalyzer>>();
+        _analyzer = new CodeAnalyzer(loggerMock.Object);
         
         // Reflection verwenden, um auf die private BoostContent-Methode zuzugreifen
         var analyzerType = typeof(CodeAnalyzer);

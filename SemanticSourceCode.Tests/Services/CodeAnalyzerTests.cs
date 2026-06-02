@@ -1,5 +1,7 @@
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.Extensions.Logging;
+using Moq;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Services;
 using Xunit;
@@ -12,7 +14,13 @@ namespace SemanticSourceCode.Tests.Services;
 /// </summary>
 public class CodeAnalyzerTests
 {
-    private readonly CodeAnalyzer _analyzer = new();
+    private readonly Mock<ILogger<CodeAnalyzer>> _loggerMock = new();
+    private readonly CodeAnalyzer _analyzer;
+
+    public CodeAnalyzerTests()
+    {
+        _analyzer = new CodeAnalyzer(_loggerMock.Object);
+    }
 
     /// <summary>
 /// Tests that the analyzer correctly extracts class information from a simple C# file.
