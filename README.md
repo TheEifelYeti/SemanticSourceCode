@@ -4,7 +4,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
-![Tests](https://img.shields.io/badge/Tests-63%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-109%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
 ## Highlights
@@ -17,6 +17,120 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 🚀 **Enhanced Search Quality** — Content boosting and query expansion for better results
 - 🏷️ **Framework Detection** — Automatic detection of ASP.NET Controllers, Services and Middleware
 - 📊 **Call Graph Analysis** — Track method calls and dependencies between code chunks
+
+## Search Features
+
+### Hybrid Search (Keyword + Semantic)
+
+The search engine combines semantic similarity with keyword matching:
+
+- **Semantic Score** — Cosine similarity of embeddings (weight: 0.7)
+- **Keyword Score** — Matches in class names, member names, and content (weight: 0.3)
+- **Combined** — `hybrid_score = 0.7 * semantic + 0.3 * keyword`
+
+This ensures that exact keyword matches (e.g., `class DatabaseService`) are not overshadowed by semantically similar but structurally irrelevant results.
+
+### Context Filters
+
+Narrow down search results with structural filters:
+
+```bash
+# Only search in controllers
+./SemanticSourceCode --mode search --namespace Api.Controllers --http-method GET
+
+# Only search in specific class
+./SemanticSourceCode --mode search --class DatabaseService
+
+# File path pattern
+./SemanticSourceCode --mode search --file-pattern "*/Controllers/*"
+```
+
+Available filters:
+| Filter | CLI Flag | Description |
+|--------|----------|-------------|
+| Namespace | `--namespace` | Match namespace name (exact or partial) |
+| Class | `--class` | Match class name |
+| HTTP Method | `--http-method` | Match HTTP method (GET, POST, etc.) |
+| File Pattern | `--file-pattern` | Match file path (glob pattern) |
+
+### Query Suggestions ("Did you mean...?")
+
+When no strong matches are found, the engine suggests alternative queries based on Levenshtein distance to known class and member names:
+
+```
+> DataBase
+Meintest du: DatabaseService?
+```
+
+Suggestions are computed from the indexed codebase and require no external dependencies.
+
+### Adaptive Threshold
+
+The similarity threshold adjusts automatically based on:
+
+- **Score Distribution** — Percentile-based analysis of result scores
+- **Gap Detection** — Elbow method to find natural cutoffs
+- **Query Specificity** — Shorter queries get lower thresholds (generic), longer queries get higher thresholds (specific)
+
+Configure in `appsettings.json`:
+
+```json
+{
+  "Search": {
+    "AdaptiveThreshold": {
+      "Enabled": true,
+      "FloorThreshold": 0.30,
+      "CeilingThreshold": 0.85,
+      "Percentile": 70
+    }
+  }
+}
+```
+
+### Re-Ranking with Structural Signals
+
+Results are re-ranked using structural boosts:
+
+| Signal | Boost | Description |
+|--------|-------|-------------|
+| ClassName Match | ×1.3 | Query matches class name |
+| MemberName Match | ×1.0 | Query matches member name |
+| Controller | ×1.1 | ASP.NET Controller detected |
+| Service | ×1.1 | Service class detected |
+| Middleware | ×1.1 | Middleware class detected |
+| Documentation | ×1.05 | Has XML documentation |
+| Small File | ×0.9 | Penalty for very small files (often helpers) |
+
+### Configuration
+
+All search features can be configured in `appsettings.json`:
+
+```json
+{
+  "Search": {
+    "MinimumSimilarity": 0.35,
+    "TopK": 20,
+    "DisplayCount": 5,
+    "WeakMatchThreshold": 0.30,
+    "Hybrid": {
+      "SemanticWeight": 0.7,
+      "KeywordWeight": 0.3
+    },
+    "AdaptiveThreshold": {
+      "Enabled": true,
+      "FloorThreshold": 0.30,
+      "CeilingThreshold": 0.85,
+      "Percentile": 70
+    },
+    "ReRanking": {
+      "ClassNameBoost": 1.3,
+      "MemberNameBoost": 1.0,
+      "ControllerBoost": 1.1,
+      "DocumentationBoost": 1.05
+    }
+  }
+}
+```
 
 ## Architecture
 
@@ -48,6 +162,11 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 | EmbeddingServiceFactory | Auto-Detect Provider | Services/EmbeddingServiceFactory.cs |
 | IVectorDatabase | Vektor-Storage mit Cosine Sim | Services/IVectorDatabase.cs |
 | SqliteVssDatabase | SQLite + vec0 Implementation | Services/SqliteVssDatabase.cs |
+| HybridSearchService | Kombiniert Semantic + Keyword | Search/HybridSearchService.cs |
+| ResultRanker | Re-Ranking mit strukturellen Signalen | Search/ResultRanker.cs |
+| QuerySuggester | Levenshtein-basierte Vorschläge | Search/QuerySuggester.cs |
+| AdaptiveThreshold | Dynamischer Threshold | Search/AdaptiveThreshold.cs |
+| SearchFilter | Kontext-Filter (Namespace, Class, etc.) | Search/SearchFilter.cs |
 | QueryExpander | Synonym-Erweiterung | Search/QueryExpander.cs |
 | CodeChunk | Datenmodell | Models/CodeChunk.cs |
 
@@ -136,7 +255,7 @@ If neither provider is reachable, you'll get a clear error with installation ins
 ```bash
 dotnet restore
 dotnet build
-dotnet test        # All 63 tests should pass
+dotnet test        # All 109 tests should pass
 dotnet publish -c Release
 ```
 
