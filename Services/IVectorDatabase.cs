@@ -7,7 +7,7 @@ namespace SemanticSourceCode.Services;
 /// Stores and queries code chunks with their vector embeddings.
 /// Provides semantic similarity search using cosine similarity.
 /// </summary>
-public interface IVectorDatabase
+public interface IVectorDatabase : SemanticSourceCode.Search.IChunkIndexAccessor
 {
     /// <summary>
     /// Initializes the database, creating tables and indexes if they don't exist.

@@ -484,6 +484,26 @@ public class SqliteVssDatabase : IVectorDatabase
         return Task.FromResult(_isInitialized);
     }
 
+    public async Task<IReadOnlyList<CodeChunk>> GetAllChunksAsync(CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync();
+
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        using var command = new SqliteCommand("SELECT * FROM CodeChunks", connection);
+        var results = new List<CodeChunk>();
+
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(ReadChunkFromReader(reader));
+        }
+
+        return results;
+    }
+
     private async Task EnsureInitializedAsync()
     {
         if (!_isInitialized)

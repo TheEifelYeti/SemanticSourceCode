@@ -31,6 +31,7 @@ public class Program
         });
         services.AddTransient<IVectorDatabase, SqliteVssDatabase>();
         services.AddTransient<IQueryExpander, QueryExpander>();
+        services.AddTransient<IQuerySuggester, QuerySuggester>();
 
         // Add logging
         services.AddLogging(builder =>

@@ -14,6 +14,7 @@ public static class SearchCommand
         var embeddingService = services.GetRequiredService<IEmbeddingService>();
         var database = services.GetRequiredService<IVectorDatabase>();
         var queryExpander = services.GetRequiredService<IQueryExpander>();
+        var querySuggester = services.GetRequiredService<IQuerySuggester>();
 
         await database.InitializeAsync();
 
@@ -77,6 +78,18 @@ public static class SearchCommand
 
                 if (filteredResults.Count == 0 && maxScore >= searchOptions.WeakMatchThreshold)
                 {
+                    // Try to suggest alternative queries
+                    if (!hasFilter)
+                    {
+                        var allChunks = await database.GetAllChunksAsync();
+                        var suggestions = querySuggester.Suggest(query, allChunks);
+                        if (suggestions.Count > 0)
+                        {
+                            Console.WriteLine($"Meintest du: {string.Join(", ", suggestions)}?");
+                            Console.WriteLine();
+                        }
+                    }
+
                     var weakMatches = resultsWithScores.Take(3).ToList();
                     Console.WriteLine($"Weak matches found (similarity < {searchOptions.MinimumSimilarity:F2}):");
                     Console.WriteLine();
