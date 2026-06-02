@@ -15,6 +15,8 @@ public static class SearchCommand
         var database = services.GetRequiredService<IVectorDatabase>();
         var queryExpander = services.GetRequiredService<IQueryExpander>();
         var querySuggester = services.GetRequiredService<IQuerySuggester>();
+        var adaptiveThreshold = services.GetRequiredService<IAdaptiveThreshold>();
+        var hybridSearch = services.GetRequiredService<IHybridSearchService>();
 
         await database.InitializeAsync();
 
@@ -73,10 +75,22 @@ public static class SearchCommand
                     .Take(searchOptions.DisplayCount)
                     .ToList();
 
+                // Compute adaptive threshold if enabled
+                var scores = resultsWithScores.Select(r => r.Similarity).ToList();
+                var adaptiveMinScore = adaptiveThreshold.Compute(scores, searchOptions.AdaptiveThreshold, query);
+                
+                // Override with adaptive threshold if it's more restrictive than the configured minimum
+                var effectiveThreshold = Math.Max(searchOptions.MinimumSimilarity, adaptiveMinScore);
+                
+                var finalResults = resultsWithScores
+                    .Where(r => r.Similarity >= effectiveThreshold)
+                    .Take(searchOptions.DisplayCount)
+                    .ToList();
+
                 var avgScore = resultsWithScores.Count > 0 ? resultsWithScores.Average(r => r.Similarity) : 0;
                 var maxScore = resultsWithScores.Count > 0 ? resultsWithScores.Max(r => r.Similarity) : 0;
 
-                if (filteredResults.Count == 0 && maxScore >= searchOptions.WeakMatchThreshold)
+                if (finalResults.Count == 0 && maxScore >= searchOptions.WeakMatchThreshold)
                 {
                     // Try to suggest alternative queries
                     if (!hasFilter)
@@ -91,7 +105,7 @@ public static class SearchCommand
                     }
 
                     var weakMatches = resultsWithScores.Take(3).ToList();
-                    Console.WriteLine($"Weak matches found (similarity < {searchOptions.MinimumSimilarity:F2}):");
+                    Console.WriteLine($"Weak matches found (similarity < {effectiveThreshold:F2}):");
                     Console.WriteLine();
                     for (int i = 0; i < weakMatches.Count; i++)
                     {
@@ -104,12 +118,12 @@ public static class SearchCommand
                     continue;
                 }
 
-                Console.WriteLine($"\nFound {filteredResults.Count} results (filtered by similarity >= {searchOptions.MinimumSimilarity:F2}):");
+                Console.WriteLine($"\nFound {finalResults.Count} results (filtered by similarity >= {effectiveThreshold:F2}):");
                 Console.WriteLine(new string('=', 80));
 
-                for (int i = 0; i < filteredResults.Count; i++)
+                for (int i = 0; i < finalResults.Count; i++)
                 {
-                    var (result, score) = filteredResults[i];
+                    var (result, score) = finalResults[i];
                     Console.WriteLine($"\n{i + 1}. {result.NamespaceName}.{result.ClassName}.{result.MemberName}");
                     Console.WriteLine($"   Similarity: {score:F4}");
                     Console.WriteLine($"   Type: {result.MemberType}");

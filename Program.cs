@@ -32,6 +32,10 @@ public class Program
         services.AddTransient<IVectorDatabase, SqliteVssDatabase>();
         services.AddTransient<IQueryExpander, QueryExpander>();
         services.AddTransient<IQuerySuggester, QuerySuggester>();
+        services.AddTransient<IHybridSearchService, HybridSearchService>();
+        services.AddTransient<IKeywordIndex, KeywordIndexService>();
+        services.AddTransient<IResultRanker, ResultRanker>();
+        services.AddTransient<IAdaptiveThreshold, AdaptiveThreshold>();
 
         // Add logging
         services.AddLogging(builder =>
