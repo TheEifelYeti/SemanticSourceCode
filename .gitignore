@@ -1,0 +1,6 @@
+bin/
+obj/
+*.user
+codechunks.db
+*.db
+core.*
