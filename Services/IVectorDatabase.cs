@@ -70,4 +70,18 @@ public interface IVectorDatabase : SemanticSourceCode.Search.IChunkIndexAccessor
     /// </summary>
     /// <returns>True if the database is initialized; otherwise, false.</returns>
     Task<bool> IsInitializedAsync();
+
+    /// <summary>
+    /// Gets all stored content hashes, keyed by chunk ID.
+    /// Used to detect which chunks have changed since the last indexing run.
+    /// </summary>
+    /// <returns>A dictionary mapping chunk ID to its content hash.</returns>
+    Task<Dictionary<string, string>> GetAllContentHashesAsync();
+
+    /// <summary>
+    /// Deletes all chunks and call edges for files that no longer exist on the file system.
+    /// Also cleans up orphaned vec_embeddings entries.
+    /// </summary>
+    /// <returns>The number of files whose chunks were removed.</returns>
+    Task<int> DeleteChunksForNonExistentFilesAsync();
 }

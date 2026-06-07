@@ -2,7 +2,12 @@ namespace SemanticSourceCode.Models;
 
 public class CodeChunk
 {
-    public string Id { get; set; } = Guid.NewGuid().ToString();
+    /// <summary>
+    /// Semantic ID for the chunk. Should be set by CodeAnalyzer.ComputeSemanticId
+    /// based on file path, namespace, class, member, type and chunk index.
+    /// Stable across re-indexing runs.
+    /// </summary>
+    public string Id { get; set; } = string.Empty;
     public string FilePath { get; set; } = string.Empty;
     public string NamespaceName { get; set; } = string.Empty;
     public string ClassName { get; set; } = string.Empty;
@@ -62,4 +67,9 @@ public class CodeChunk
     public string ParentChunkId { get; set; } = string.Empty;
 
     public DateTime IndexedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// SHA256 hash of the Content field. Used to detect changes without re-embedding.
+    /// </summary>
+    public string ContentHash { get; set; } = string.Empty;
 }
