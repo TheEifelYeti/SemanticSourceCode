@@ -108,11 +108,17 @@ public class MethodChunker
             {
                 // Finalize current chunk
                 var chunkEnd = currentChunkStart + currentChunkLines;
-                var chunkLines = lines.GetRange(currentChunkStart, chunkEnd - currentChunkStart);
-                chunks.Add(string.Join("\n", chunkLines));
+                if (chunkEnd > lines.Count) chunkEnd = lines.Count;
+                if (currentChunkStart >= 0 && currentChunkStart < lines.Count && chunkEnd > currentChunkStart)
+                {
+                    var chunkLines = lines.GetRange(currentChunkStart, chunkEnd - currentChunkStart);
+                    chunks.Add(string.Join("\n", chunkLines));
+                }
 
                 // Start new chunk with overlap (include previous lines for context)
                 var overlapStart = Math.Max(currentChunkStart, chunkEnd - _options.OverlapLines);
+                if (overlapStart < 0) overlapStart = 0;
+                if (overlapStart > lines.Count) overlapStart = lines.Count;
                 currentChunkStart = overlapStart;
                 currentChunkLines = chunkEnd - overlapStart;
             }
@@ -136,11 +142,18 @@ public class MethodChunker
         {
             var chunkEnd = currentChunkStart + currentChunkLines;
             if (chunkEnd > lines.Count) chunkEnd = lines.Count;
-            if (currentChunkStart < lines.Count)
+            if (currentChunkStart < 0) currentChunkStart = 0;
+            if (currentChunkStart < lines.Count && chunkEnd > currentChunkStart)
             {
                 var chunkLines = lines.GetRange(currentChunkStart, chunkEnd - currentChunkStart);
                 chunks.Add(string.Join("\n", chunkLines));
             }
+        }
+
+        // If chunking produced no results (shouldn't happen, but be defensive)
+        if (chunks.Count == 0)
+        {
+            chunks.Add(string.Join("\n", lines));
         }
 
         return chunks;
