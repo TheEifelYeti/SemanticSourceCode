@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SemanticSourceCode.Models;
+using SemanticSourceCode.Search;
 using SemanticSourceCode.Services;
 
 namespace SemanticSourceCode.Cli;
@@ -13,6 +14,7 @@ public static class IndexCommand
         var analyzer = services.GetRequiredService<ICodeAnalyzer>();
         var embeddingService = services.GetRequiredService<IEmbeddingService>();
         var database = services.GetRequiredService<IVectorDatabase>();
+        var keywordIndex = services.GetRequiredService<IKeywordIndex>();
 
         await database.InitializeAsync();
 
@@ -76,6 +78,7 @@ public static class IndexCommand
 
                 chunk.Embedding = ConvertFloatArrayToByteArray(embedding);
                 await database.InsertChunkAsync(chunk);
+                await keywordIndex.IndexChunkAsync(chunk);
 
                 processed++;
                 if (processed % 10 == 0)

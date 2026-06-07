@@ -17,6 +17,7 @@ public static class SearchCommand
         var querySuggester = services.GetRequiredService<IQuerySuggester>();
         var adaptiveThreshold = services.GetRequiredService<IAdaptiveThreshold>();
         var hybridSearch = services.GetRequiredService<IHybridSearchService>();
+        var keywordIndex = services.GetRequiredService<IKeywordIndex>();
 
         await database.InitializeAsync();
 
@@ -59,36 +60,44 @@ public static class SearchCommand
             {
                 var queryEmbedding = await embeddingService.GenerateEmbeddingAsync(expandedQuery);
 
-                List<(CodeChunk Chunk, float Similarity)> resultsWithScores;
+                // Decide whether to use hybrid search based on keyword index availability
+                bool useHybrid = await keywordIndex.IsAvailableAsync();
 
-                if (hasFilter)
+                List<HybridResult> hybridResults;
+                if (useHybrid)
                 {
-                    resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, filter!, topK: searchTopK);
+                    hybridResults = await hybridSearch.SearchAsync(
+                        queryEmbedding, expandedQuery, topK: searchTopK, filter: filter ?? new SearchFilter());
                 }
                 else
                 {
-                    resultsWithScores = await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: searchTopK);
+                    // Fallback: pure vector search wrapped into HybridResult
+                    var semanticResults = hasFilter
+                        ? await database.SearchSimilarWithScoresAsync(queryEmbedding, filter!, topK: searchTopK)
+                        : await database.SearchSimilarWithScoresAsync(queryEmbedding, topK: searchTopK);
+
+                    hybridResults = semanticResults.Select(r => new HybridResult
+                    {
+                        Chunk = r.Chunk,
+                        SemanticScore = r.Similarity,
+                        KeywordScore = 0f,
+                        HybridScore = r.Similarity,
+                        FinalScore = r.Similarity
+                    }).ToList();
                 }
 
-                var filteredResults = resultsWithScores
-                    .Where(r => r.Similarity >= searchOptions.MinimumSimilarity)
-                    .Take(searchOptions.DisplayCount)
-                    .ToList();
+                var hybridScores = hybridResults.Select(r => r.HybridScore).ToList();
+                var adaptiveMinScore = adaptiveThreshold.Compute(hybridScores, searchOptions.AdaptiveThreshold, query);
 
-                // Compute adaptive threshold if enabled
-                var scores = resultsWithScores.Select(r => r.Similarity).ToList();
-                var adaptiveMinScore = adaptiveThreshold.Compute(scores, searchOptions.AdaptiveThreshold, query);
-                
-                // Override with adaptive threshold if it's more restrictive than the configured minimum
                 var effectiveThreshold = Math.Max(searchOptions.MinimumSimilarity, adaptiveMinScore);
-                
-                var finalResults = resultsWithScores
-                    .Where(r => r.Similarity >= effectiveThreshold)
+
+                var finalResults = hybridResults
+                    .Where(r => r.HybridScore >= effectiveThreshold)
                     .Take(searchOptions.DisplayCount)
                     .ToList();
 
-                var avgScore = resultsWithScores.Count > 0 ? resultsWithScores.Average(r => r.Similarity) : 0;
-                var maxScore = resultsWithScores.Count > 0 ? resultsWithScores.Max(r => r.Similarity) : 0;
+                var avgScore = hybridResults.Count > 0 ? hybridResults.Average(r => r.HybridScore) : 0;
+                var maxScore = hybridResults.Count > 0 ? hybridResults.Max(r => r.HybridScore) : 0;
 
                 if (finalResults.Count == 0 && maxScore >= searchOptions.WeakMatchThreshold)
                 {
@@ -104,42 +113,42 @@ public static class SearchCommand
                         }
                     }
 
-                    var weakMatches = resultsWithScores.Take(3).ToList();
-                    Console.WriteLine($"Weak matches found (similarity < {effectiveThreshold:F2}):");
+                    var weakMatches = hybridResults.Take(3).ToList();
+                    Console.WriteLine($"Weak matches found (score < {effectiveThreshold:F2}):");
                     Console.WriteLine();
                     for (int i = 0; i < weakMatches.Count; i++)
                     {
-                        var (result, score) = weakMatches[i];
-                        Console.WriteLine($"{i + 1}. {result.NamespaceName}.{result.ClassName}.{result.MemberName}");
-                        Console.WriteLine($"   Similarity: {score:F4}");
+                        var result = weakMatches[i];
+                        Console.WriteLine($"{i + 1}. {result.Chunk.NamespaceName}.{result.Chunk.ClassName}.{result.Chunk.MemberName}");
+                        Console.WriteLine($"   Score: {result.HybridScore:F4} (semantic={result.SemanticScore:F4}, keyword={result.KeywordScore:F4})");
                     }
                     Console.WriteLine();
                     Console.WriteLine($"Tip: Results may be less relevant. Try a more specific query.");
                     continue;
                 }
 
-                Console.WriteLine($"\nFound {finalResults.Count} results (filtered by similarity >= {effectiveThreshold:F2}):");
+                Console.WriteLine($"\nFound {finalResults.Count} results (filtered by score >= {effectiveThreshold:F2}):");
                 Console.WriteLine(new string('=', 80));
 
                 for (int i = 0; i < finalResults.Count; i++)
                 {
-                    var (result, score) = finalResults[i];
-                    Console.WriteLine($"\n{i + 1}. {result.NamespaceName}.{result.ClassName}.{result.MemberName}");
-                    Console.WriteLine($"   Similarity: {score:F4}");
-                    Console.WriteLine($"   Type: {result.MemberType}");
-                    Console.WriteLine($"   File: {result.FilePath} (lines {result.StartLine}-{result.EndLine})");
-                    Console.WriteLine($"   Signature: {result.Signature.Split('\n')[0]}");
+                    var result = finalResults[i];
+                    Console.WriteLine($"\n{i + 1}. {result.Chunk.NamespaceName}.{result.Chunk.ClassName}.{result.Chunk.MemberName}");
+                    Console.WriteLine($"   Score: {result.HybridScore:F4} (semantic={result.SemanticScore:F4}, keyword={result.KeywordScore:F4})");
+                    Console.WriteLine($"   Type: {result.Chunk.MemberType}");
+                    Console.WriteLine($"   File: {result.Chunk.FilePath} (lines {result.Chunk.StartLine}-{result.Chunk.EndLine})");
+                    Console.WriteLine($"   Signature: {result.Chunk.Signature.Split('\n')[0]}");
 
-                    if (!string.IsNullOrWhiteSpace(result.Documentation))
+                    if (!string.IsNullOrWhiteSpace(result.Chunk.Documentation))
                     {
-                        var doc = result.Documentation.Replace("\n", " ").Replace("///", "").Trim();
+                        var doc = result.Chunk.Documentation.Replace("\n", " ").Replace("///", "").Trim();
                         if (doc.Length > 100)
                             doc = doc[..100] + "...";
                         Console.WriteLine($"   Documentation: {doc}");
                     }
 
                     Console.WriteLine($"   Content Preview:");
-                    var contentPreview = result.Content.Replace("\n", " ").Replace("\r", "");
+                    var contentPreview = result.Chunk.Content.Replace("\n", " ").Replace("\r", "");
                     if (contentPreview.Length > 200)
                         contentPreview = contentPreview[..200] + "...";
                     Console.WriteLine($"   {contentPreview}");
