@@ -553,19 +553,32 @@ public class SqliteVssDatabase : IVectorDatabase
         // Step 4: Clean up orphaned vec_embeddings (sqlite-vec has no ON DELETE CASCADE)
         if (_vecLoaded)
         {
-            using var cleanupVecCmd = new SqliteCommand(@"
-                DELETE FROM vec_embeddings
-                WHERE chunk_id NOT IN (SELECT Id FROM CodeChunks)", connection);
-            await cleanupVecCmd.ExecuteNonQueryAsync();
+            try
+            {
+                using var cleanupVecCmd = new SqliteCommand(@"
+                    DELETE FROM vec_embeddings
+                    WHERE chunk_id NOT IN (SELECT Id FROM CodeChunks)", connection);
+                await cleanupVecCmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("vec_embeddings cleanup skipped: {Message}", ex.Message);
+            }
         }
 
-        // Step 5: Clean up orphaned call edges
-        using (var cleanupEdgesCmd = new SqliteCommand(@"
-            DELETE FROM CallEdges
-            WHERE SourceChunkId NOT IN (SELECT Id FROM CodeChunks)
-               OR TargetChunkId NOT IN (SELECT Id FROM CodeChunks)", connection))
+        // Step 5: Clean up orphaned call edges (only if the table exists)
+        try
         {
+            using var cleanupEdgesCmd = new SqliteCommand(@"
+                DELETE FROM CallEdges
+                WHERE SourceChunkId NOT IN (SELECT Id FROM CodeChunks)
+                   OR TargetChunkId NOT IN (SELECT Id FROM CodeChunks)", connection);
             await cleanupEdgesCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // CallEdges table doesn't exist yet (e.g. fresh DB) — nothing to clean up
+            _logger?.LogDebug("CallEdges cleanup skipped: table does not exist");
         }
 
         return missingFiles.Count;
