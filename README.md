@@ -4,7 +4,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
-![Tests](https://img.shields.io/badge/Tests-184%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-193%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
 ## Highlights
@@ -14,6 +14,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 💾 **SQLite Vector Database** — Simple embedded database with cosine similarity search
 - 🔎 **Semantic Search** — Find code based on meaning, not just keywords
 - 👀 **Watch Mode** — Live incremental re-indexing on file changes (500 ms debounce, Ctrl+C to stop)
+- 📜 **Scriptable Search** — Non-interactive one-shot mode with `--query` for pipes, scripts and agentic use
 - ⚡ **Multiple Providers** — Switch between Ollama and LM Studio via configuration
 - 🚀 **Enhanced Search Quality** — Content boosting and query expansion for better results
 - 🏷️ **Framework Detection** — Automatic detection of ASP.NET Controllers, Services and Middleware
@@ -306,6 +307,8 @@ vim ./src/Services/MyService.cs   # → re-indexes automatically
 
 ### 3. Search
 
+**Interactive mode:**
+
 ```bash
 # Start interactive search mode
 ./SemanticSourceCode --mode search
@@ -316,6 +319,42 @@ Example queries:
 - "Database connection handling"
 - "Async HTTP client"
 - "User authentication"
+
+**Non-interactive (one-shot) mode:**
+
+```bash
+# Default (text format) — prints human-readable results, exits
+./SemanticSourceCode --mode search --query "arithmetic calculation"
+
+# JSON output — for piping into jq, scripts, or other tools
+./SemanticSourceCode --mode search --query "arithmetic calculation" --format json
+
+# Quiet output — only the top-1 result, one line
+./SemanticSourceCode --mode search --query "Add" --quiet
+
+# Short flags
+./SemanticSourceCode --mode search -q "Add" -f json -l 2
+
+# With structural filter
+./SemanticSourceCode --mode search -q "Query" --namespace MyApp.Data
+```
+
+The one-shot mode is perfect for scripts and agentic use:
+
+| Flag | Description |
+|------|-------------|
+| `--query, -q` | The search query (triggers non-interactive mode) |
+| `--format, -f` | `text` (default), `json`, or `quiet` |
+| `--limit, -l` | Max results to display |
+| `--quiet` | Shorthand for `--format quiet` |
+| `--namespace` | Filter to chunks in this namespace |
+| `--class` | Filter to chunks in this class |
+| `--http-method` | Filter to controller methods with this verb |
+| `--file-pattern` | Filter to files matching this glob |
+
+**Exit codes** (non-interactive only):
+- `0` — at least one result found
+- `1` — no results, validation error, or DB not initialized
 
 ## Configuration
 

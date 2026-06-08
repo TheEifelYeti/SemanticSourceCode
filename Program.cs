@@ -119,17 +119,29 @@ public class Program
         Console.WriteLine("Usage:");
         Console.WriteLine("  SemanticSourceCode --mode index --path <directory>");
         Console.WriteLine("  SemanticSourceCode --mode watch --path <directory>");
-        Console.WriteLine("  SemanticSourceCode --mode search");
+        Console.WriteLine("  SemanticSourceCode --mode search --query <text>     [non-interactive]");
+        Console.WriteLine("  SemanticSourceCode --mode search                     [interactive]");
         Console.WriteLine();
         Console.WriteLine("Modes:");
         Console.WriteLine("  index   - Index C# files in the specified directory (one-shot, incremental)");
         Console.WriteLine("  watch   - Watch directory for *.cs changes and re-index live (Ctrl+C to stop)");
-        Console.WriteLine("  search  - Start interactive semantic search");
+        Console.WriteLine("  search  - Search the indexed code base (interactive, or one-shot with --query)");
+        Console.WriteLine();
+        Console.WriteLine("Search flags (with --query for one-shot):");
+        Console.WriteLine("  --query, -q       <text>  The search query (triggers non-interactive mode)");
+        Console.WriteLine("  --format, -f      text|json|quiet  Output format (default: text)");
+        Console.WriteLine("  --limit, -l       <N>    Max results to display (default from config)");
+        Console.WriteLine("  --quiet                   Shorthand for --format quiet");
+        Console.WriteLine("  --namespace       <ns>    Filter to chunks in this namespace");
+        Console.WriteLine("  --class           <name> Filter to chunks in this class");
+        Console.WriteLine("  --http-method     <verb> Filter to controller methods with this HTTP verb");
+        Console.WriteLine("  --file-pattern    <patt> Filter to files matching this glob pattern");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  SemanticSourceCode --mode index --path ./src");
-        Console.WriteLine("  SemanticSourceCode --mode index --path /home/user/projects/MyApp");
         Console.WriteLine("  SemanticSourceCode --mode watch --path ./src");
-        Console.WriteLine("  SemanticSourceCode --mode search");
+        Console.WriteLine("  SemanticSourceCode --mode search --query \"arithmetic calculation\"");
+        Console.WriteLine("  SemanticSourceCode --mode search -q \"database connection\" --format json");
+        Console.WriteLine("  SemanticSourceCode --mode search -q \"sum\" --quiet");
     }
 }
