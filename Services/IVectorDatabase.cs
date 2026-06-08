@@ -84,4 +84,12 @@ public interface IVectorDatabase : SemanticSourceCode.Search.IChunkIndexAccessor
     /// </summary>
     /// <returns>The number of files whose chunks were removed.</returns>
     Task<int> DeleteChunksForNonExistentFilesAsync();
+
+    /// <summary>
+    /// Deletes all chunks, vec_embeddings and call edges for a specific file.
+    /// Used by watch mode when a file is deleted or renamed.
+    /// </summary>
+    /// <param name="filePath">The absolute or relative path of the file whose chunks should be removed.</param>
+    /// <returns>The number of chunks that were removed.</returns>
+    Task<int> DeleteChunksByFilePathAsync(string filePath);
 }

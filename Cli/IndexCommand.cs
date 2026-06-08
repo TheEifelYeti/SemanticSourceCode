@@ -9,12 +9,16 @@ namespace SemanticSourceCode.Cli;
 
 public static class IndexCommand
 {
+    /// <summary>
+    /// Entry point for `--mode index --path X`.
+    /// Runs a full directory index with cleanup of deleted files.
+    /// </summary>
     public static async Task<int> RunAsync(IServiceProvider services, string path, ILogger logger)
     {
         var analyzer = services.GetRequiredService<ICodeAnalyzer>();
-        var embeddingService = services.GetRequiredService<IEmbeddingService>();
         var database = services.GetRequiredService<IVectorDatabase>();
         var keywordIndex = services.GetRequiredService<IKeywordIndex>();
+        var embeddingService = services.GetRequiredService<IEmbeddingService>();
 
         await database.InitializeAsync();
 
@@ -46,7 +50,25 @@ public static class IndexCommand
             return 2;
         }
 
-        // Step 3: Identify chunks that need re-indexing (new or changed content)
+        // Step 3 + 4: Identify and process changed chunks (delegated to shared logic)
+        return await ProcessChunksAsync(chunks, existingHashes, embeddingService, database, keywordIndex, logger);
+    }
+
+    /// <summary>
+    /// Shared embedding + DB insert loop used by both `IndexCommand` and `WatchCommand`.
+    /// Filters out chunks whose ContentHash matches the existing hash and only
+    /// embeds + persists the changed ones.
+    /// </summary>
+    /// <returns>0 on success, non-zero on error.</returns>
+    public static async Task<int> ProcessChunksAsync(
+        List<CodeChunk> chunks,
+        Dictionary<string, string> existingHashes,
+        IEmbeddingService embeddingService,
+        IVectorDatabase database,
+        IKeywordIndex keywordIndex,
+        ILogger logger)
+    {
+        // Identify chunks that need re-indexing (new or changed content)
         var changedChunks = chunks.Where(c =>
             !existingHashes.TryGetValue(c.Id, out var existingHash) || existingHash != c.ContentHash
         ).ToList();
@@ -61,7 +83,7 @@ public static class IndexCommand
             return 0;
         }
 
-        // Step 4: Generate embeddings only for changed chunks
+        // Generate embeddings only for changed chunks
         logger.LogInformation("Generating embeddings for {Count} changed chunks...", changedChunks.Count);
         var processed = 0;
         foreach (var chunk in changedChunks)
