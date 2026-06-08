@@ -4,7 +4,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
-![Tests](https://img.shields.io/badge/Tests-109%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-184%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
 ## Highlights
@@ -13,6 +13,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 🧠 **Local Embeddings** — Uses Ollama or LM Studio locally, no cloud dependency, no data leakage
 - 💾 **SQLite Vector Database** — Simple embedded database with cosine similarity search
 - 🔎 **Semantic Search** — Find code based on meaning, not just keywords
+- 👀 **Watch Mode** — Live incremental re-indexing on file changes (500 ms debounce, Ctrl+C to stop)
 - ⚡ **Multiple Providers** — Switch between Ollama and LM Studio via configuration
 - 🚀 **Enhanced Search Quality** — Content boosting and query expansion for better results
 - 🏷️ **Framework Detection** — Automatic detection of ASP.NET Controllers, Services and Middleware
@@ -271,7 +272,39 @@ dotnet publish -c Release
 ./SemanticSourceCode --mode index --path /home/user/projects/MyApp
 ```
 
-### 2. Search
+### 2. Watch (live incremental indexing)
+
+```bash
+# Start watch mode on a directory
+./SemanticSourceCode --mode watch --path ./src
+```
+
+Watch mode runs an initial full index, then keeps the process running and
+re-indexes the affected file automatically whenever a `*.cs` file is
+created, changed, deleted, or renamed. The index stays fresh within
+~500 ms of an edit, so searches in another shell always see the latest code.
+
+- **Debounce** — Multiple rapid saves to the same file are coalesced
+  into a single re-index (default: 500 ms).
+- **Excluded directories** — `bin/`, `obj/`, `.git/`, `.vs/`, `.idea/`,
+  `node_modules/`, `dist/`, `build/` are ignored automatically.
+- **Stop** — Press `Ctrl+C` to stop watching. The watcher exits cleanly,
+  no leftover background tasks.
+
+Example workflow:
+
+```bash
+# Terminal 1: start watching
+./SemanticSourceCode --mode watch --path ./src
+
+# Terminal 2: edit a file
+vim ./src/Services/MyService.cs   # → re-indexes automatically
+
+# Terminal 3: search while watching
+./SemanticSourceCode --mode search
+```
+
+### 3. Search
 
 ```bash
 # Start interactive search mode
