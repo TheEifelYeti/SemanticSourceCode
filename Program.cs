@@ -37,16 +37,6 @@ public class Program
         services.AddTransient<IResultRanker, ResultRanker>();
         services.AddTransient<IAdaptiveThreshold, AdaptiveThreshold>();
 
-        // Add logging
-        services.AddLogging(builder =>
-        {
-            builder.AddConsole();
-            builder.SetMinimumLevel(LogLevel.Information);
-        });
-
-        var serviceProvider = services.BuildServiceProvider();
-        var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
-
         // Parse arguments
         if (args.Length == 0)
         {
@@ -55,6 +45,25 @@ public class Program
         }
 
         var mode = args[0].ToLowerInvariant();
+
+        // Detect MCP mode early so we can route logging to stderr (keep stdout clean for JSON-RPC).
+        bool isMcp = mode == "--mode" && args.Length >= 2 && args[1].Equals("mcp", StringComparison.OrdinalIgnoreCase);
+
+        // Add logging (with stderr routing in MCP mode to keep stdout clean for JSON-RPC)
+        services.AddLogging(builder =>
+        {
+            builder.AddConsole(opts =>
+            {
+                if (isMcp)
+                {
+                    opts.LogToStandardErrorThreshold = LogLevel.Trace;
+                }
+            });
+            builder.SetMinimumLevel(LogLevel.Information);
+        });
+
+        var serviceProvider = services.BuildServiceProvider();
+        var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
 
         switch (mode)
         {
@@ -100,6 +109,16 @@ public class Program
                 {
                     return await SearchCommand.RunAsync(serviceProvider, configuration, logger, args);
                 }
+                else if (subMode == "mcp")
+                {
+                    var cts = new CancellationTokenSource();
+                    Console.CancelKeyPress += (_, e) =>
+                    {
+                        e.Cancel = true;
+                        cts.Cancel();
+                    };
+                    return await McpCommand.RunAsync(serviceProvider, logger, cts.Token);
+                }
                 else
                 {
                     ShowUsage();
@@ -121,11 +140,13 @@ public class Program
         Console.WriteLine("  SemanticSourceCode --mode watch --path <directory>");
         Console.WriteLine("  SemanticSourceCode --mode search --query <text>     [non-interactive]");
         Console.WriteLine("  SemanticSourceCode --mode search                     [interactive]");
+        Console.WriteLine("  SemanticSourceCode --mode mcp                        [for AI agents]");
         Console.WriteLine();
         Console.WriteLine("Modes:");
         Console.WriteLine("  index   - Index C# files in the specified directory (one-shot, incremental)");
         Console.WriteLine("  watch   - Watch directory for *.cs changes and re-index live (Ctrl+C to stop)");
         Console.WriteLine("  search  - Search the indexed code base (interactive, or one-shot with --query)");
+        Console.WriteLine("  mcp     - Run as an MCP (Model Context Protocol) JSON-RPC server over stdio");
         Console.WriteLine();
         Console.WriteLine("Search flags (with --query for one-shot):");
         Console.WriteLine("  --query, -q       <text>  The search query (triggers non-interactive mode)");
@@ -143,5 +164,6 @@ public class Program
         Console.WriteLine("  SemanticSourceCode --mode search --query \"arithmetic calculation\"");
         Console.WriteLine("  SemanticSourceCode --mode search -q \"database connection\" --format json");
         Console.WriteLine("  SemanticSourceCode --mode search -q \"sum\" --quiet");
+        Console.WriteLine("  SemanticSourceCode --mode mcp   # connect from Claude Code, Cursor, etc.");
     }
 }
