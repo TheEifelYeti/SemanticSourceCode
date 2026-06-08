@@ -79,6 +79,23 @@ public class Program
                     var path = args[pathIndex + 1];
                     return await IndexCommand.RunAsync(serviceProvider, path, logger);
                 }
+                else if (subMode == "watch")
+                {
+                    var pathIndex = Array.IndexOf(args, "--path");
+                    if (pathIndex == -1 || pathIndex + 1 >= args.Length)
+                    {
+                        logger.LogError("--path is required for watch mode");
+                        return 1;
+                    }
+                    var path = args[pathIndex + 1];
+                    var cts = new CancellationTokenSource();
+                    Console.CancelKeyPress += (_, e) =>
+                    {
+                        e.Cancel = true;
+                        cts.Cancel();
+                    };
+                    return await WatchCommand.RunAsync(serviceProvider, path, logger, cts.Token);
+                }
                 else if (subMode == "search")
                 {
                     return await SearchCommand.RunAsync(serviceProvider, configuration, logger, args);
@@ -101,15 +118,18 @@ public class Program
         Console.WriteLine();
         Console.WriteLine("Usage:");
         Console.WriteLine("  SemanticSourceCode --mode index --path <directory>");
+        Console.WriteLine("  SemanticSourceCode --mode watch --path <directory>");
         Console.WriteLine("  SemanticSourceCode --mode search");
         Console.WriteLine();
         Console.WriteLine("Modes:");
-        Console.WriteLine("  index   - Index C# files in the specified directory");
+        Console.WriteLine("  index   - Index C# files in the specified directory (one-shot, incremental)");
+        Console.WriteLine("  watch   - Watch directory for *.cs changes and re-index live (Ctrl+C to stop)");
         Console.WriteLine("  search  - Start interactive semantic search");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  SemanticSourceCode --mode index --path ./src");
         Console.WriteLine("  SemanticSourceCode --mode index --path /home/user/projects/MyApp");
+        Console.WriteLine("  SemanticSourceCode --mode watch --path ./src");
         Console.WriteLine("  SemanticSourceCode --mode search");
     }
 }

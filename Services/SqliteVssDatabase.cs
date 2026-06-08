@@ -584,6 +584,83 @@ public class SqliteVssDatabase : IVectorDatabase
         return missingFiles.Count;
     }
 
+    /// <summary>
+    /// Deletes all chunks, vec_embeddings and call edges for a specific file.
+    /// Used by watch mode when a file is deleted or renamed.
+    /// </summary>
+    /// <param name="filePath">The absolute or relative path of the file whose chunks should be removed.</param>
+    /// <returns>The number of chunks that were removed.</returns>
+    public async Task<int> DeleteChunksByFilePathAsync(string filePath)
+    {
+        await EnsureInitializedAsync();
+
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return 0;
+        }
+
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        // Step 1: Count how many chunks we're about to delete (for return value + log)
+        int deletedCount;
+        using (var countCmd = new SqliteCommand(
+            "SELECT COUNT(*) FROM CodeChunks WHERE FilePath = @FilePath", connection))
+        {
+            countCmd.Parameters.AddWithValue("@FilePath", filePath);
+            var countResult = await countCmd.ExecuteScalarAsync();
+            deletedCount = countResult == null ? 0 : Convert.ToInt32(countResult);
+        }
+
+        if (deletedCount == 0)
+        {
+            return 0;
+        }
+
+        // Step 2: Delete the chunks for this file
+        using (var deleteChunksCmd = new SqliteCommand(
+            "DELETE FROM CodeChunks WHERE FilePath = @FilePath", connection))
+        {
+            deleteChunksCmd.Parameters.AddWithValue("@FilePath", filePath);
+            await deleteChunksCmd.ExecuteNonQueryAsync();
+        }
+
+        // Step 3: Clean up orphaned vec_embeddings (sqlite-vec has no ON DELETE CASCADE)
+        if (_vecLoaded)
+        {
+            try
+            {
+                using var cleanupVecCmd = new SqliteCommand(@"
+                    DELETE FROM vec_embeddings
+                    WHERE chunk_id NOT IN (SELECT Id FROM CodeChunks)", connection);
+                await cleanupVecCmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("vec_embeddings cleanup skipped: {Message}", ex.Message);
+            }
+        }
+
+        // Step 4: Clean up orphaned call edges (only if the table exists)
+        try
+        {
+            using var cleanupEdgesCmd = new SqliteCommand(@"
+                DELETE FROM CallEdges
+                WHERE SourceChunkId NOT IN (SELECT Id FROM CodeChunks)
+                   OR TargetChunkId NOT IN (SELECT Id FROM CodeChunks)", connection);
+            await cleanupEdgesCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // CallEdges table doesn't exist yet (e.g. fresh DB) — nothing to clean up
+            _logger?.LogDebug("CallEdges cleanup skipped: table does not exist");
+        }
+
+        _logger?.LogDebug("Removed {Count} chunks for file: {FilePath}", deletedCount, filePath);
+        return deletedCount;
+    }
+
     public async Task<IReadOnlyList<CodeChunk>> GetAllChunksAsync(CancellationToken ct = default)
     {
         await EnsureInitializedAsync();
