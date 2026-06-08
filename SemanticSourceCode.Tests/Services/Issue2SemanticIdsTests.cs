@@ -43,9 +43,9 @@ public class Issue2SemanticIdsTests : IDisposable
     public void ComputeSemanticId_SameInputs_ReturnsSameId()
     {
         var id1 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0);
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
         var id2 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0);
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
 
         Assert.Equal(id1, id2);
     }
@@ -54,9 +54,9 @@ public class Issue2SemanticIdsTests : IDisposable
     public void ComputeSemanticId_DifferentFile_ReturnsDifferentId()
     {
         var id1 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0);
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
         var id2 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Baz.cs", "MyApp", "Foo", "Bar", "Method", 0);
+            "/src/Baz.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
 
         Assert.NotEqual(id1, id2);
     }
@@ -65,9 +65,9 @@ public class Issue2SemanticIdsTests : IDisposable
     public void ComputeSemanticId_DifferentMemberName_ReturnsDifferentId()
     {
         var id1 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0);
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
         var id2 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Qux", "Method", 0);
+            "/src/Foo.cs", "MyApp", "Foo", "Qux", "Method", 0, "void Qux()");
 
         Assert.NotEqual(id1, id2);
     }
@@ -76,9 +76,9 @@ public class Issue2SemanticIdsTests : IDisposable
     public void ComputeSemanticId_DifferentChunkIndex_ReturnsDifferentId()
     {
         var id1 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0);
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
         var id2 = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 1);
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 1, "void Bar()");
 
         Assert.NotEqual(id1, id2);
     }
@@ -87,10 +87,114 @@ public class Issue2SemanticIdsTests : IDisposable
     public void ComputeSemanticId_ReturnsLowercaseHex_64Chars()
     {
         var id = CodeAnalyzer.ComputeSemanticId(
-            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0);
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
 
         Assert.Equal(64, id.Length);
         Assert.Matches("^[0-9a-f]{64}$", id);
+    }
+
+    [Fact]
+    public void ComputeSemanticId_DifferentMethodOverloads_ReturnsDifferentIds()
+    {
+        // Two method overloads with same name but different parameter lists
+        // must produce different chunk IDs to avoid collisions.
+        var id1 = CodeAnalyzer.ComputeSemanticId(
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar(int x)");
+        var id2 = CodeAnalyzer.ComputeSemanticId(
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar(int x, int y)");
+
+        Assert.NotEqual(id1, id2);
+    }
+
+    [Fact]
+    public void ComputeSemanticId_DifferentConstructorOverloads_ReturnsDifferentIds()
+    {
+        // Two constructor overloads must produce different IDs (MemberName == ClassName).
+        var id1 = CodeAnalyzer.ComputeSemanticId(
+            "/src/Foo.cs", "MyApp", "Foo", "Foo", "Constructor", 0, "public Foo(int x)");
+        var id2 = CodeAnalyzer.ComputeSemanticId(
+            "/src/Foo.cs", "MyApp", "Foo", "Foo", "Constructor", 0, "public Foo(int x, int y)");
+
+        Assert.NotEqual(id1, id2);
+    }
+
+    [Fact]
+    public void ComputeSemanticId_OverloadVsNonOverload_ReturnsDifferentIds()
+    {
+        // Sanity: a method and a "phantom" overload with the same name+signature
+        // are still different if the signature actually differs.
+        var id1 = CodeAnalyzer.ComputeSemanticId(
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar()");
+        var id2 = CodeAnalyzer.ComputeSemanticId(
+            "/src/Foo.cs", "MyApp", "Foo", "Bar", "Method", 0, "void Bar(int x)");
+
+        Assert.NotEqual(id1, id2);
+    }
+
+    [Fact]
+    public void FinalizeChunkIdentity_MethodOverloads_GetDifferentIds()
+    {
+        // End-to-end: two chunks that differ only in signature get different IDs.
+        var chunk1 = new CodeChunk
+        {
+            FilePath = "/src/Foo.cs",
+            NamespaceName = "MyApp",
+            ClassName = "Foo",
+            MemberName = "Bar",
+            MemberType = "Method",
+            ChunkIndex = 0,
+            Signature = "void Bar(int x)",
+            Content = "body1"
+        };
+        var chunk2 = new CodeChunk
+        {
+            FilePath = "/src/Foo.cs",
+            NamespaceName = "MyApp",
+            ClassName = "Foo",
+            MemberName = "Bar",
+            MemberType = "Method",
+            ChunkIndex = 0,
+            Signature = "void Bar(int x, int y)",
+            Content = "body2"
+        };
+
+        CodeAnalyzer.FinalizeChunkIdentity(chunk1);
+        CodeAnalyzer.FinalizeChunkIdentity(chunk2);
+
+        Assert.NotEqual(chunk1.Id, chunk2.Id);
+    }
+
+    [Fact]
+    public void FinalizeChunkIdentity_ConstructorOverloads_GetDifferentIds()
+    {
+        // End-to-end: two constructor chunks with different signatures get different IDs.
+        var chunk1 = new CodeChunk
+        {
+            FilePath = "/src/Foo.cs",
+            NamespaceName = "MyApp",
+            ClassName = "Foo",
+            MemberName = "Foo",
+            MemberType = "Constructor",
+            ChunkIndex = 0,
+            Signature = "public Foo(IConfiguration configuration)",
+            Content = "ctor body 1"
+        };
+        var chunk2 = new CodeChunk
+        {
+            FilePath = "/src/Foo.cs",
+            NamespaceName = "MyApp",
+            ClassName = "Foo",
+            MemberName = "Foo",
+            MemberType = "Constructor",
+            ChunkIndex = 0,
+            Signature = "public Foo(IConfiguration configuration, ILogger<Foo>? logger)",
+            Content = "ctor body 2"
+        };
+
+        CodeAnalyzer.FinalizeChunkIdentity(chunk1);
+        CodeAnalyzer.FinalizeChunkIdentity(chunk2);
+
+        Assert.NotEqual(chunk1.Id, chunk2.Id);
     }
 
     // ---------- CodeAnalyzer.ComputeContentHash ----------
