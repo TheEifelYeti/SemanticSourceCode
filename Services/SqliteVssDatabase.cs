@@ -48,6 +48,7 @@ public class SqliteVssDatabase : IVectorDatabase
                 EndLine INTEGER NOT NULL,
                 Embedding BLOB,
                 IndexedAt TEXT NOT NULL,
+                ContentHash TEXT NOT NULL DEFAULT '',
                 IsController INTEGER DEFAULT 0,
                 IsService INTEGER DEFAULT 0,
                 IsMiddleware INTEGER DEFAULT 0,
@@ -105,6 +106,7 @@ public class SqliteVssDatabase : IVectorDatabase
         await TryAddColumnAsync(connection, "CodeChunks", "IsMiddleware", "INTEGER DEFAULT 0");
         await TryAddColumnAsync(connection, "CodeChunks", "HttpMethods", "TEXT");
         await TryAddColumnAsync(connection, "CodeChunks", "RouteTemplate", "TEXT");
+        await TryAddColumnAsync(connection, "CodeChunks", "ContentHash", "TEXT NOT NULL DEFAULT ''");
 
         // Create vec0 virtual table for ANN vector search if extension loaded
         if (_vecLoaded)
@@ -188,8 +190,8 @@ public class SqliteVssDatabase : IVectorDatabase
 
         var insertCmd = @"
             INSERT OR REPLACE INTO CodeChunks 
-            (Id, FilePath, NamespaceName, ClassName, MemberName, MemberType, Content, Signature, Documentation, StartLine, EndLine, Embedding, IndexedAt, IsController, IsService, IsMiddleware, HttpMethods, RouteTemplate)
-            VALUES (@Id, @FilePath, @NamespaceName, @ClassName, @MemberName, @MemberType, @Content, @Signature, @Documentation, @StartLine, @EndLine, @Embedding, @IndexedAt, @IsController, @IsService, @IsMiddleware, @HttpMethods, @RouteTemplate)";
+            (Id, FilePath, NamespaceName, ClassName, MemberName, MemberType, Content, Signature, Documentation, StartLine, EndLine, Embedding, IndexedAt, ContentHash, IsController, IsService, IsMiddleware, HttpMethods, RouteTemplate)
+            VALUES (@Id, @FilePath, @NamespaceName, @ClassName, @MemberName, @MemberType, @Content, @Signature, @Documentation, @StartLine, @EndLine, @Embedding, @IndexedAt, @ContentHash, @IsController, @IsService, @IsMiddleware, @HttpMethods, @RouteTemplate)";
 
         using var command = new SqliteCommand(insertCmd, connection);
         command.Parameters.AddWithValue("@Id", chunk.Id);
@@ -205,6 +207,7 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@EndLine", chunk.EndLine);
         command.Parameters.AddWithValue("@Embedding", chunk.Embedding ?? Array.Empty<byte>());
         command.Parameters.AddWithValue("@IndexedAt", chunk.IndexedAt.ToString("O"));
+        command.Parameters.AddWithValue("@ContentHash", chunk.ContentHash ?? string.Empty);
         command.Parameters.AddWithValue("@IsController", chunk.IsController ? 1 : 0);
         command.Parameters.AddWithValue("@IsService", chunk.IsService ? 1 : 0);
         command.Parameters.AddWithValue("@IsMiddleware", chunk.IsMiddleware ? 1 : 0);
@@ -484,6 +487,103 @@ public class SqliteVssDatabase : IVectorDatabase
         return Task.FromResult(_isInitialized);
     }
 
+    /// <summary>
+    /// Gets all stored content hashes, keyed by chunk ID.
+    /// Used to detect which chunks have changed since the last indexing run.
+    /// </summary>
+    public async Task<Dictionary<string, string>> GetAllContentHashesAsync()
+    {
+        await EnsureInitializedAsync();
+
+        var result = new Dictionary<string, string>();
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        using var command = new SqliteCommand("SELECT Id, ContentHash FROM CodeChunks", connection);
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result[reader.GetString(0)] = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Deletes all chunks and call edges for files that no longer exist on disk.
+    /// Also cleans up orphaned vec_embeddings entries.
+    /// </summary>
+    /// <returns>The number of files whose chunks were removed.</returns>
+    public async Task<int> DeleteChunksForNonExistentFilesAsync()
+    {
+        await EnsureInitializedAsync();
+
+        var connectionString = $"Data Source={_dbPath};";
+        using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        // Step 1: Find all distinct file paths currently in the DB
+        var filesInDb = new List<string>();
+        using (var selectCmd = new SqliteCommand("SELECT DISTINCT FilePath FROM CodeChunks", connection))
+        {
+            using var reader = await selectCmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                filesInDb.Add(reader.GetString(0));
+            }
+        }
+
+        // Step 2: Filter to those that no longer exist
+        var missingFiles = filesInDb.Where(f => !File.Exists(f)).ToList();
+        if (missingFiles.Count == 0)
+        {
+            return 0;
+        }
+
+        // Step 3: Delete chunks for missing files (one DELETE per file to keep the query simple)
+        foreach (var file in missingFiles)
+        {
+            using var deleteChunksCmd = new SqliteCommand(
+                "DELETE FROM CodeChunks WHERE FilePath = @FilePath", connection);
+            deleteChunksCmd.Parameters.AddWithValue("@FilePath", file);
+            await deleteChunksCmd.ExecuteNonQueryAsync();
+            _logger?.LogInformation("Removed chunks for missing file: {FilePath}", file);
+        }
+
+        // Step 4: Clean up orphaned vec_embeddings (sqlite-vec has no ON DELETE CASCADE)
+        if (_vecLoaded)
+        {
+            try
+            {
+                using var cleanupVecCmd = new SqliteCommand(@"
+                    DELETE FROM vec_embeddings
+                    WHERE chunk_id NOT IN (SELECT Id FROM CodeChunks)", connection);
+                await cleanupVecCmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("vec_embeddings cleanup skipped: {Message}", ex.Message);
+            }
+        }
+
+        // Step 5: Clean up orphaned call edges (only if the table exists)
+        try
+        {
+            using var cleanupEdgesCmd = new SqliteCommand(@"
+                DELETE FROM CallEdges
+                WHERE SourceChunkId NOT IN (SELECT Id FROM CodeChunks)
+                   OR TargetChunkId NOT IN (SELECT Id FROM CodeChunks)", connection);
+            await cleanupEdgesCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // CallEdges table doesn't exist yet (e.g. fresh DB) — nothing to clean up
+            _logger?.LogDebug("CallEdges cleanup skipped: table does not exist");
+        }
+
+        return missingFiles.Count;
+    }
+
     public async Task<IReadOnlyList<CodeChunk>> GetAllChunksAsync(CancellationToken ct = default)
     {
         await EnsureInitializedAsync();
@@ -693,16 +793,23 @@ public class SqliteVssDatabase : IVectorDatabase
         var fieldCount = reader.FieldCount;
         var expectedColumns = 13; // Original 13 columns (0-12)
 
+        // ContentHash is at index 13 (added in Issue #2)
+        if (fieldCount > 13)
+        {
+            var contentHashValue = reader.GetValue(13 + offset);
+            chunk.ContentHash = contentHashValue == DBNull.Value ? string.Empty : (string)contentHashValue;
+        }
+
         if (fieldCount > expectedColumns)
         {
-            chunk.IsController = reader.GetInt32(13 + offset) != 0;
-            chunk.IsService = reader.GetInt32(14 + offset) != 0;
-            chunk.IsMiddleware = reader.GetInt32(15 + offset) != 0;
+            chunk.IsController = reader.GetInt32(14 + offset) != 0;
+            chunk.IsService = reader.GetInt32(15 + offset) != 0;
+            chunk.IsMiddleware = reader.GetInt32(16 + offset) != 0;
 
-            var httpMethodsValue = reader.GetValue(16 + offset);
+            var httpMethodsValue = reader.GetValue(17 + offset);
             chunk.HttpMethods = httpMethodsValue == DBNull.Value ? null : (string?)httpMethodsValue;
 
-            var routeTemplateValue = reader.GetValue(17 + offset);
+            var routeTemplateValue = reader.GetValue(18 + offset);
             chunk.RouteTemplate = routeTemplateValue == DBNull.Value ? null : (string?)routeTemplateValue;
         }
 

@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Extensions.Logging;
 using SemanticSourceCode.Models;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace SemanticSourceCode.Services;
@@ -136,7 +137,6 @@ public class CodeAnalyzer : ICodeAnalyzer
                 var chunkLines = chunkBody.Split('\n').Length;
                 var subChunk = new CodeChunk
                 {
-                    Id = Guid.NewGuid().ToString(),
                     FilePath = parent.FilePath,
                     NamespaceName = parent.NamespaceName,
                     ClassName = parent.ClassName,
@@ -159,6 +159,12 @@ public class CodeAnalyzer : ICodeAnalyzer
 
         _pendingMethodChunks.Clear();
         chunks.AddRange(additionalChunks);
+
+        // Finalize semantic IDs and content hashes for all chunks
+        foreach (var chunk in chunks)
+        {
+            FinalizeChunkIdentity(chunk);
+        }
 
         return chunks;
     }
@@ -627,5 +633,57 @@ public class CodeAnalyzer : ICodeAnalyzer
         if (isMiddleware) sb.AppendLine("[FRAMEWORK] middleware pipeline");
         
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Computes a deterministic, semantic ID for a code chunk.
+    /// The same member in the same file with the same chunk index and signature always gets the same ID.
+    /// This enables stable UPSERT behaviour across re-indexing runs.
+    /// </summary>
+    /// <param name="filePath">Absolute or relative path to the source file.</param>
+    /// <param name="namespaceName">Namespace containing the member.</param>
+    /// <param name="className">Name of the declaring class.</param>
+    /// <param name="memberName">Name of the member (method, property, etc.).</param>
+    /// <param name="memberType">Type of the member (Method, Property, Constructor, etc.).</param>
+    /// <param name="chunkIndex">Index of the chunk within a split method (0 for non-split).</param>
+    /// <param name="signature">Full member signature (including parameter list) to disambiguate overloads.</param>
+    /// <returns>A 64-character lowercase hex string.</returns>
+    public static string ComputeSemanticId(
+        string filePath, string namespaceName, string className,
+        string memberName, string memberType, int chunkIndex,
+        string signature)
+    {
+        var input = $"{filePath}|{namespaceName}|{className}|{memberName}|{memberType}|{chunkIndex}|{signature ?? string.Empty}";
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Computes a SHA256 hash of the chunk content for change detection.
+    /// </summary>
+    /// <param name="content">The chunk's code content.</param>
+    /// <returns>A 64-character lowercase hex string.</returns>
+    public static string ComputeContentHash(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+        {
+            return string.Empty;
+        }
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(content));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Populates the semantic ID and content hash on a chunk.
+    /// Idempotent — safe to call multiple times on the same chunk.
+    /// </summary>
+    public static void FinalizeChunkIdentity(CodeChunk chunk)
+    {
+        if (chunk == null) return;
+        chunk.Id = ComputeSemanticId(
+            chunk.FilePath, chunk.NamespaceName, chunk.ClassName,
+            chunk.MemberName, chunk.MemberType, chunk.ChunkIndex,
+            chunk.Signature);
+        chunk.ContentHash = ComputeContentHash(chunk.Content);
     }
 }

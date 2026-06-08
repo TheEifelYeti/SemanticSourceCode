@@ -15,6 +15,8 @@ public class KeywordIndexService : IKeywordIndex
 {
     private readonly string _dbPath;
     private readonly ILogger<KeywordIndexService>? _logger;
+    private bool _isInitialized = false;
+    private readonly SemaphoreSlim _initLock = new(1, 1);
 
     public KeywordIndexService(IConfiguration configuration, ILogger<KeywordIndexService>? logger = null)
     {
@@ -22,8 +24,46 @@ public class KeywordIndexService : IKeywordIndex
         _dbPath = configuration["Database:Path"] ?? "codechunks.db";
     }
 
+    private async Task EnsureInitializedAsync()
+    {
+        if (_isInitialized) return;
+
+        await _initLock.WaitAsync();
+        try
+        {
+            if (_isInitialized) return;
+
+            var connectionString = $"Data Source={_dbPath};";
+            using var connection = new SqliteConnection(connectionString);
+            await connection.OpenAsync();
+
+            var createTableCmd = @"
+                CREATE TABLE IF NOT EXISTS KeywordIndex (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ChunkId TEXT NOT NULL,
+                    Term TEXT NOT NULL,
+                    Weight REAL NOT NULL DEFAULT 1.0,
+                    IndexedAt TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_keyword_term ON KeywordIndex(Term);
+                CREATE INDEX IF NOT EXISTS idx_keyword_chunk ON KeywordIndex(ChunkId);
+            ";
+
+            using var command = new SqliteCommand(createTableCmd, connection);
+            await command.ExecuteNonQueryAsync();
+
+            _isInitialized = true;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
+    }
+
     public async Task IndexChunkAsync(CodeChunk chunk)
     {
+        await EnsureInitializedAsync();
+
         var connectionString = $"Data Source={_dbPath};";
         using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync();
@@ -62,9 +102,25 @@ public class KeywordIndexService : IKeywordIndex
 
     public async Task<List<(CodeChunk Chunk, float Score)>> SearchKeywordMatchesAsync(string query, int topK = 20)
     {
+        await EnsureInitializedAsync();
+
+        // If the CodeChunks table doesn't exist (e.g. fresh DB where the user
+        // is searching before indexing), the JOIN would fail. Return empty
+        // list to preserve graceful degradation.
         var connectionString = $"Data Source={_dbPath};";
         using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync();
+
+        using (var checkCmd = new SqliteCommand(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='CodeChunks'", connection))
+        {
+            var exists = await checkCmd.ExecuteScalarAsync();
+            if (exists == null)
+            {
+                _logger?.LogDebug("CodeChunks table does not exist; returning empty keyword results");
+                return new List<(CodeChunk, float)>();
+            }
+        }
 
         var queryTerms = Tokenize(query);
         if (queryTerms.Count == 0)
@@ -139,6 +195,8 @@ public class KeywordIndexService : IKeywordIndex
 
     public async Task ClearAsync()
     {
+        await EnsureInitializedAsync();
+
         var connectionString = $"Data Source={_dbPath};";
         using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync();
