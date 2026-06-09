@@ -4,7 +4,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
-![Tests](https://img.shields.io/badge/Tests-193%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-207%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
 ## Highlights
@@ -14,6 +14,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 💾 **SQLite Vector Database** — Simple embedded database with cosine similarity search
 - 🔎 **Semantic Search** — Find code based on meaning, not just keywords
 - 👀 **Watch Mode** — Live incremental re-indexing on file changes (500 ms debounce, Ctrl+C to stop)
+- 🔌 **MCP Server** — Expose the search as a Model Context Protocol tool for Claude Code, Cursor, etc.
 - 📜 **Scriptable Search** — Non-interactive one-shot mode with `--query` for pipes, scripts and agentic use
 - ⚡ **Multiple Providers** — Switch between Ollama and LM Studio via configuration
 - 🚀 **Enhanced Search Quality** — Content boosting and query expansion for better results
@@ -355,6 +356,41 @@ The one-shot mode is perfect for scripts and agentic use:
 **Exit codes** (non-interactive only):
 - `0` — at least one result found
 - `1` — no results, validation error, or DB not initialized
+
+### 4. MCP Server (for AI agents)
+
+```bash
+# Start the MCP server over stdio
+./SemanticSourceCode --mode mcp
+```
+
+The server speaks **JSON-RPC 2.0** over **stdin/stdout** (MCP standard). It
+exposes two tools that AI agents (Claude Code, Cursor, Cline, etc.) can
+call directly:
+
+| Tool | Description |
+|------|-------------|
+| `search_code` | Semantic search with optional `namespace`, `class`, `filePattern`, `limit` filters |
+| `get_chunk_by_id` | Fetch a single indexed chunk by its semantic ID |
+
+Status messages go to **stderr** so the JSON-RPC channel on **stdout**
+stays clean for client parsing.
+
+**Example: configure Claude Code (`~/.config/claude-code/mcp.json` or
+project-local `.mcp.json`):**
+```json
+{
+  "mcpServers": {
+    "semantic-source-code": {
+      "command": "SemanticSourceCode",
+      "args": ["--mode", "mcp"]
+    }
+  }
+}
+```
+
+After restarting Claude Code, the agent can call `search_code` and
+`get_chunk_by_id` directly in its tool-using workflow.
 
 ## Configuration
 
