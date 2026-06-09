@@ -14,7 +14,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 💾 **SQLite Vector Database** — Simple embedded database with cosine similarity search
 - 🔎 **Semantic Search** — Find code based on meaning, not just keywords
 - 👀 **Watch Mode** — Live incremental re-indexing on file changes (500 ms debounce, Ctrl+C to stop)
-- 🔌 **MCP Server** — Expose the search as a Model Context Protocol tool for Claude Code, Cursor, etc.
+- 🔌 **MCP Server** — Expose the search as a Model Context Protocol tool.
 - 📜 **Scriptable Search** — Non-interactive one-shot mode with `--query` for pipes, scripts and agentic use
 - ⚡ **Multiple Providers** — Switch between Ollama and LM Studio via configuration
 - 🚀 **Enhanced Search Quality** — Content boosting and query expansion for better results
@@ -365,7 +365,7 @@ The one-shot mode is perfect for scripts and agentic use:
 ```
 
 The server speaks **JSON-RPC 2.0** over **stdin/stdout** (MCP standard). It
-exposes two tools that AI agents (Claude Code, Cursor, Cline, etc.) can
+exposes two tools that AI agents can
 call directly:
 
 | Tool | Description |
@@ -376,7 +376,7 @@ call directly:
 Status messages go to **stderr** so the JSON-RPC channel on **stdout**
 stays clean for client parsing.
 
-**Example: configure Claude Code (`~/.config/claude-code/mcp.json` or
+**Example:
 project-local `.mcp.json`):**
 ```json
 {
@@ -389,7 +389,7 @@ project-local `.mcp.json`):**
 }
 ```
 
-After restarting Claude Code, the agent can call `search_code` and
+After restarting the agent can call `search_code` and
 `get_chunk_by_id` directly in its tool-using workflow.
 
 ## Configuration
