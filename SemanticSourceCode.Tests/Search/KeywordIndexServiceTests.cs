@@ -1,5 +1,6 @@
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Search;
+using SemanticSourceCode.Tests.Data;
 using Xunit;
 
 namespace SemanticSourceCode.Tests.Search;
@@ -72,9 +73,8 @@ public class KeywordIndexServiceTests
     public void ExtractTerms_ClassName_HasHighestWeight()
     {
         // Arrange
-        var service = new KeywordIndexService(
-            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-            null);
+        var service = TestDatabaseFactory.BuildKeywordIndexService(
+            Path.Combine(Path.GetTempPath(), $"kw_{Guid.NewGuid():N}.db"));
 
         var chunk = new CodeChunk
         {
@@ -101,9 +101,8 @@ public class KeywordIndexServiceTests
     public void ExtractTerms_Content_LimitedTo200Terms()
     {
         // Arrange
-        var service = new KeywordIndexService(
-            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-            null);
+        var service = TestDatabaseFactory.BuildKeywordIndexService(
+            Path.Combine(Path.GetTempPath(), $"kw_{Guid.NewGuid():N}.db"));
 
         var longContent = string.Join(" ", Enumerable.Range(1, 100).Select(i => $"word{i}"));
         var chunk = new CodeChunk
@@ -197,9 +196,8 @@ public class KeywordIndexServiceTests
     public void ExtractTerms_IdentifierParts_HaveHigherWeight()
     {
         // Arrange
-        var service = new KeywordIndexService(
-            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-            null);
+        var service = TestDatabaseFactory.BuildKeywordIndexService(
+            Path.Combine(Path.GetTempPath(), $"kw_{Guid.NewGuid():N}.db"));
 
         var chunk = new CodeChunk
         {

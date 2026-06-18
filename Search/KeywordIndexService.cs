@@ -1,6 +1,6 @@
 using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using SemanticSourceCode.Data;
 using SemanticSourceCode.Models;
 using System.Globalization;
 
@@ -10,69 +10,42 @@ namespace SemanticSourceCode.Search;
 /// SQLite-backed keyword index for code chunks.
 /// Uses a regular terms table (not FTS5, since FTS5 may not be available in all SQLite builds).
 /// Provides weighted keyword search on ClassName, MemberName, Signature, FilePath, Namespace.
+///
+/// <para>
+/// Schema lifecycle and connection opening are delegated to
+/// <see cref="IDatabaseInitializer"/> and <see cref="ISqliteConnectionFactory"/>
+/// respectively. This service no longer tracks its own
+/// <c>_isInitialized</c> flag or <c>_initLock</c> \u2014 the initializer
+/// is idempotent and thread-safe.
+/// </para>
 /// </summary>
 public class KeywordIndexService : IKeywordIndex
 {
-    private readonly string _dbPath;
+    private readonly ISqliteConnectionFactory _factory;
+    private readonly IDatabaseInitializer _initializer;
     private readonly ILogger<KeywordIndexService>? _logger;
-    private bool _isInitialized = false;
-    private readonly SemaphoreSlim _initLock = new(1, 1);
 
-    public KeywordIndexService(IConfiguration configuration, ILogger<KeywordIndexService>? logger = null)
+    public KeywordIndexService(
+        ISqliteConnectionFactory factory,
+        IDatabaseInitializer initializer,
+        ILogger<KeywordIndexService>? logger = null)
     {
+        _factory = factory ?? throw new ArgumentNullException(nameof(factory));
+        _initializer = initializer ?? throw new ArgumentNullException(nameof(initializer));
         _logger = logger;
-        _dbPath = configuration["Database:Path"] ?? "codechunks.db";
-    }
-
-    private async Task EnsureInitializedAsync()
-    {
-        if (_isInitialized) return;
-
-        await _initLock.WaitAsync();
-        try
-        {
-            if (_isInitialized) return;
-
-            var connectionString = $"Data Source={_dbPath};";
-            using var connection = new SqliteConnection(connectionString);
-            await connection.OpenAsync();
-
-            var createTableCmd = @"
-                CREATE TABLE IF NOT EXISTS KeywordIndex (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ChunkId TEXT NOT NULL,
-                    Term TEXT NOT NULL,
-                    Weight REAL NOT NULL DEFAULT 1.0,
-                    IndexedAt TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_keyword_term ON KeywordIndex(Term);
-                CREATE INDEX IF NOT EXISTS idx_keyword_chunk ON KeywordIndex(ChunkId);
-            ";
-
-            using var command = new SqliteCommand(createTableCmd, connection);
-            await command.ExecuteNonQueryAsync();
-
-            _isInitialized = true;
-        }
-        finally
-        {
-            _initLock.Release();
-        }
     }
 
     public async Task IndexChunkAsync(CodeChunk chunk)
     {
-        await EnsureInitializedAsync();
+        await _initializer.EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         // Delete existing terms for this chunk first
         using (var deleteCmd = new SqliteCommand("DELETE FROM KeywordIndex WHERE ChunkId = @chunkId", connection))
         {
             deleteCmd.Parameters.AddWithValue("@chunkId", chunk.Id);
-            await deleteCmd.ExecuteNonQueryAsync();
+            await deleteCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
 
         var terms = ExtractTerms(chunk);
@@ -88,7 +61,7 @@ public class KeywordIndexService : IKeywordIndex
             command.Parameters.AddWithValue("@Term", term.ToLowerInvariant());
             command.Parameters.AddWithValue("@Weight", weight);
             command.Parameters.AddWithValue("@IndexedAt", DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
     }
 
@@ -96,25 +69,23 @@ public class KeywordIndexService : IKeywordIndex
     {
         foreach (var chunk in chunks)
         {
-            await IndexChunkAsync(chunk);
+            await IndexChunkAsync(chunk).ConfigureAwait(false);
         }
     }
 
     public async Task<List<(CodeChunk Chunk, float Score)>> SearchKeywordMatchesAsync(string query, int topK = 20)
     {
-        await EnsureInitializedAsync();
+        await _initializer.EnsureInitializedAsync().ConfigureAwait(false);
 
         // If the CodeChunks table doesn't exist (e.g. fresh DB where the user
         // is searching before indexing), the JOIN would fail. Return empty
         // list to preserve graceful degradation.
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         using (var checkCmd = new SqliteCommand(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='CodeChunks'", connection))
         {
-            var exists = await checkCmd.ExecuteScalarAsync();
+            var exists = await checkCmd.ExecuteScalarAsync().ConfigureAwait(false);
             if (exists == null)
             {
                 _logger?.LogDebug("CodeChunks table does not exist; returning empty keyword results");
@@ -150,8 +121,8 @@ public class KeywordIndexService : IKeywordIndex
         var results = new List<(CodeChunk Chunk, float Score)>();
         float maxRawScore = 0;
 
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
         {
             var rawScore = (float)reader.GetDouble(reader.GetOrdinal("raw_score"));
             var matchCount = reader.GetInt32(reader.GetOrdinal("match_count"));
@@ -177,14 +148,12 @@ public class KeywordIndexService : IKeywordIndex
     {
         try
         {
-            var connectionString = $"Data Source={_dbPath};";
-            using var connection = new SqliteConnection(connectionString);
-            await connection.OpenAsync();
+            await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
             using var cmd = new SqliteCommand(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='KeywordIndex'",
                 connection);
-            var result = await cmd.ExecuteScalarAsync();
+            var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
             return result != null;
         }
         catch
@@ -195,14 +164,12 @@ public class KeywordIndexService : IKeywordIndex
 
     public async Task ClearAsync()
     {
-        await EnsureInitializedAsync();
+        await _initializer.EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         using var cmd = new SqliteCommand("DELETE FROM KeywordIndex", connection);
-        await cmd.ExecuteNonQueryAsync();
+        await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -243,14 +210,14 @@ public class KeywordIndexService : IKeywordIndex
             terms.Add((term, 0.4f));
         }
 
-        // Content terms (weight 0.3) — increased from 50 to 200 to catch more identifiers
+        // Content terms (weight 0.3) \u2014 increased from 50 to 200 to catch more identifiers
         var contentTerms = Tokenize(chunk.Content).Take(200);
         foreach (var term in contentTerms)
         {
             terms.Add((term, 0.3f));
         }
 
-        // Also add identifier parts from content (e.g., Auto.Tuer.Scheibe → auto, tuer, scheibe)
+        // Also add identifier parts from content (e.g., Auto.Tuer.Scheibe \u2192 auto, tuer, scheibe)
         var identifierParts = ExtractIdentifierParts(chunk.Content);
         foreach (var part in identifierParts.Take(100))
         {
@@ -339,7 +306,7 @@ public class KeywordIndexService : IKeywordIndex
 
     /// <summary>
     /// Extracts identifier parts from content with dot notation.
-    /// E.g., "Auto.Tuer.Scheibe" → ["auto", "tuer", "scheibe", "auto.tuer.scheibe"]
+    /// E.g., "Auto.Tuer.Scheibe" \u2192 ["auto", "tuer", "scheibe", "auto.tuer.scheibe"]
     /// </summary>
     internal static List<string> ExtractIdentifierParts(string text)
     {
@@ -347,25 +314,25 @@ public class KeywordIndexService : IKeywordIndex
             return new List<string>();
 
         var parts = new List<string>();
-        
+
         // Find patterns like Identifier.Identifier.Identifier
         // Split on common delimiters first
         var tokens = text.Split(new[] { ' ', '\t', '\n', '\r', '(', ')', '{', '}', '[', ']', ';', ',', '"', '\'', '+', '-', '*', '/', '=', '!', '<', '>', '&', '|', '?', '@', '#', '$', '%', '^', '~', '`' }, StringSplitOptions.RemoveEmptyEntries);
-        
+
         foreach (var token in tokens)
         {
             // Check if token contains dots (potential member access)
             if (token.Contains('.') && token.Length >= 3)
             {
                 var segments = token.Split('.');
-                
+
                 // Only process if at least one segment is long enough
                 var hasLongSegments = segments.Any(s => s.Length >= 2);
                 if (!hasLongSegments)
                 {
                     continue;
                 }
-                
+
                 // Add individual segments
                 foreach (var segment in segments)
                 {
@@ -374,7 +341,7 @@ public class KeywordIndexService : IKeywordIndex
                         parts.Add(segment.ToLowerInvariant());
                     }
                 }
-                
+
                 // Also add the full path
                 parts.Add(token.ToLowerInvariant());
             }

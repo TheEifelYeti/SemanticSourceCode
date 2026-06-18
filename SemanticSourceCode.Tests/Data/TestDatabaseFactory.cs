@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SemanticSourceCode.Data;
+using SemanticSourceCode.Search;
 using SemanticSourceCode.Services;
 
 namespace SemanticSourceCode.Tests.Data;
@@ -59,5 +60,27 @@ public static class TestDatabaseFactory
     {
         var (factory, initializer) = BuildFactory(dbPath);
         return new SqliteVssDatabase(factory, initializer, logger);
+    }
+
+    /// <summary>
+    /// Builds a fresh <see cref="KeywordIndexService"/> against the given
+    /// temp DB path. Replaces the old
+    /// <c>new KeywordIndexService(config[, logger])</c> constructor call
+    /// in tests.
+    /// </summary>
+    public static KeywordIndexService BuildKeywordIndexService(string dbPath)
+    {
+        var (factory, initializer) = BuildFactory(dbPath);
+        return new KeywordIndexService(factory, initializer);
+    }
+
+    /// <summary>
+    /// Same as <see cref="BuildKeywordIndexService(string)"/> but with an
+    /// explicit <see cref="ILogger{TCategoryName}"/>.
+    /// </summary>
+    public static KeywordIndexService BuildKeywordIndexService<T>(string dbPath, ILogger<T> logger)
+    {
+        var (factory, initializer) = BuildFactory(dbPath);
+        return new KeywordIndexService(factory, initializer, logger);
     }
 }

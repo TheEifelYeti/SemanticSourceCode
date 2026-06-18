@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Search;
+using SemanticSourceCode.Tests.Data;
 using Xunit;
 
 namespace SemanticSourceCode.Tests.Search;
@@ -19,13 +20,7 @@ public class KeywordIndexServiceRegressionTests : IDisposable
     public KeywordIndexServiceRegressionTests()
     {
         _testDbPath = Path.Combine(Path.GetTempPath(), $"kwindex_{Guid.NewGuid()}.db");
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Database:Path"] = _testDbPath
-            })
-            .Build();
-        _service = new KeywordIndexService(config);
+        _service = TestDatabaseFactory.BuildKeywordIndexService(_testDbPath);
     }
 
     public void Dispose()
