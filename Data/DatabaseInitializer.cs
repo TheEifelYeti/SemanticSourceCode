@@ -204,24 +204,14 @@ public class DatabaseInitializer : IDatabaseInitializer
                 RouteTemplate TEXT
             );";
 
-        const string createCodeChunkIndexes = @"
-            CREATE INDEX IF NOT EXISTS idx_filepath ON CodeChunks(FilePath);
-            CREATE INDEX IF NOT EXISTS idx_classname ON CodeChunks(ClassName);
-            CREATE INDEX IF NOT EXISTS idx_membertype ON CodeChunks(MemberType);";
-
         const string createKeywordIndex = @"
             CREATE TABLE IF NOT EXISTS KeywordIndex (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ChunkId TEXT NOT NULL,
                 Term TEXT NOT NULL,
                 Weight REAL NOT NULL DEFAULT 1.0,
-                IndexedAt TEXT NOT NULL,
-                FOREIGN KEY (ChunkId) REFERENCES CodeChunks(Id)
+                IndexedAt TEXT NOT NULL
             );";
-
-        const string createKeywordIndexes = @"
-            CREATE INDEX IF NOT EXISTS idx_keyword_term ON KeywordIndex(Term);
-            CREATE INDEX IF NOT EXISTS idx_keyword_chunk ON KeywordIndex(ChunkId);";
 
         const string createCallEdges = @"
             CREATE TABLE IF NOT EXISTS CallEdges (
@@ -229,23 +219,15 @@ public class DatabaseInitializer : IDatabaseInitializer
                 SourceChunkId TEXT NOT NULL,
                 TargetChunkId TEXT NOT NULL,
                 CallType TEXT NOT NULL,
-                LineNumber INTEGER,
-                FOREIGN KEY (SourceChunkId) REFERENCES CodeChunks(Id),
-                FOREIGN KEY (TargetChunkId) REFERENCES CodeChunks(Id)
+                LineNumber INTEGER
             );";
 
-        const string createCallEdgeIndexes = @"
-            CREATE INDEX IF NOT EXISTS idx_caller ON CallEdges(SourceChunkId);
-            CREATE INDEX IF NOT EXISTS idx_callee ON CallEdges(TargetChunkId);";
-
+        // 1. Create the three core tables.
         await ExecuteBatchAsync(connection, createCodeChunks, ct).ConfigureAwait(false);
-        await ExecuteBatchAsync(connection, createCodeChunkIndexes, ct).ConfigureAwait(false);
         await ExecuteBatchAsync(connection, createKeywordIndex, ct).ConfigureAwait(false);
-        await ExecuteBatchAsync(connection, createKeywordIndexes, ct).ConfigureAwait(false);
         await ExecuteBatchAsync(connection, createCallEdges, ct).ConfigureAwait(false);
-        await ExecuteBatchAsync(connection, createCallEdgeIndexes, ct).ConfigureAwait(false);
 
-        // Backward-compatible ALTER TABLE: add columns that may be missing
+        // 2. Backward-compatible ALTER TABLE: add columns that may be missing
         // on legacy databases created before the column existed. Each call
         // swallows "duplicate column" errors so it's a no-op on fresh DBs
         // where the column was created above.
@@ -255,6 +237,18 @@ public class DatabaseInitializer : IDatabaseInitializer
         await TryAddColumnAsync(connection, "CodeChunks", "HttpMethods", "TEXT", logger, ct).ConfigureAwait(false);
         await TryAddColumnAsync(connection, "CodeChunks", "RouteTemplate", "TEXT", logger, ct).ConfigureAwait(false);
         await TryAddColumnAsync(connection, "CodeChunks", "ContentHash", "TEXT NOT NULL DEFAULT ''", logger, ct).ConfigureAwait(false);
+
+        // 3. Indexes can only be created when the underlying columns exist. On
+        // very old legacy DBs the CodeChunks table may be missing columns
+        // (e.g. only Id + FilePath). CREATE INDEX on a missing column would
+        // fail, so we gate each index on a column-existence check.
+        await CreateIndexIfColumnExistsAsync(connection, "CodeChunks", "FilePath", "idx_filepath", logger, ct).ConfigureAwait(false);
+        await CreateIndexIfColumnExistsAsync(connection, "CodeChunks", "ClassName", "idx_classname", logger, ct).ConfigureAwait(false);
+        await CreateIndexIfColumnExistsAsync(connection, "CodeChunks", "MemberType", "idx_membertype", logger, ct).ConfigureAwait(false);
+        await CreateIndexIfColumnExistsAsync(connection, "KeywordIndex", "Term", "idx_keyword_term", logger, ct).ConfigureAwait(false);
+        await CreateIndexIfColumnExistsAsync(connection, "KeywordIndex", "ChunkId", "idx_keyword_chunk", logger, ct).ConfigureAwait(false);
+        await CreateIndexIfColumnExistsAsync(connection, "CallEdges", "SourceChunkId", "idx_caller", logger, ct).ConfigureAwait(false);
+        await CreateIndexIfColumnExistsAsync(connection, "CallEdges", "TargetChunkId", "idx_callee", logger, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -299,6 +293,42 @@ public class DatabaseInitializer : IDatabaseInitializer
             logger?.LogWarning(
                 "Failed to add column {Column} to {Table}: {Message}", column, table, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Creates an index only if the underlying column exists. This makes the
+    /// v1 baseline migration safe to run against very old legacy databases
+    /// whose tables may be missing one or more columns (in which case
+    /// <c>TryAddColumnAsync</c> will add the column first, and on a re-run
+    /// the index can be created safely).
+    /// </summary>
+    private static async Task CreateIndexIfColumnExistsAsync(
+        SqliteConnection connection,
+        string table,
+        string column,
+        string indexName,
+        ILogger? logger,
+        CancellationToken ct)
+    {
+        const string checkSql = "SELECT 1 FROM pragma_table_info(@table) WHERE name = @column;";
+        await using (var checkCmd = new SqliteCommand(checkSql, connection))
+        {
+            checkCmd.Parameters.AddWithValue("@table", table);
+            checkCmd.Parameters.AddWithValue("@column", column);
+            var exists = await checkCmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            if (exists == null || exists == DBNull.Value)
+            {
+                logger?.LogDebug(
+                    "Skipping index {Index} on {Table}.{Column}: column does not exist",
+                    indexName, table, column);
+                return;
+            }
+        }
+
+        const string createSql = "CREATE INDEX IF NOT EXISTS {0} ON {1}({2});";
+        await using var createCmd = new SqliteCommand(
+            string.Format(createSql, indexName, table, column), connection);
+        await createCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 }
 
