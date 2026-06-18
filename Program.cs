@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SemanticSourceCode.Cli;
+using SemanticSourceCode.Data;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Search;
 using SemanticSourceCode.Services;
@@ -21,6 +22,12 @@ public class Program
         // Setup dependency injection
         var services = new ServiceCollection();
         services.AddSingleton<IConfiguration>(configuration);
+        // Centralized SQLite connection + schema lifecycle. Both are
+        // process-singletons: the path doesn't change at runtime, and the
+        // DatabaseInitializer uses a SemaphoreSlim so concurrent callers
+        // can't corrupt the schema-version table.
+        services.AddSingleton<ISqliteConnectionFactory, SqliteConnectionFactory>();
+        services.AddSingleton<IDatabaseInitializer, DatabaseInitializer>();
         services.AddTransient<ICodeAnalyzer, CodeAnalyzer>();
         services.AddTransient<IEmbeddingService>(provider =>
         {

@@ -6,6 +6,7 @@ using SemanticSourceCode.Cli;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Search;
 using SemanticSourceCode.Services;
+using SemanticSourceCode.Tests.Data;
 using Xunit;
 
 namespace SemanticSourceCode.Tests.Cli;
@@ -36,14 +37,7 @@ public class WatchCommandTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _dbPath = Path.Combine(_tempDir, "watch.db");
 
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Database:Path"] = _dbPath
-            })
-            .Build();
-
-        _db = new SqliteVssDatabase(config, Mock.Of<ILogger<SqliteVssDatabase>>());
+        _db = TestDatabaseFactory.BuildSqliteVssDatabase(_dbPath, Mock.Of<ILogger<SqliteVssDatabase>>());
 
         // Deterministic fake embedding: 4-dim vector where every value is 1.0
         _embedding = new Mock<IEmbeddingService>();
@@ -57,7 +51,7 @@ public class WatchCommandTests : IDisposable
             .Returns(Task.CompletedTask);
 
         var services = new ServiceCollection();
-        services.AddSingleton<IConfiguration>(config);
+        services.AddSingleton<IConfiguration>(TestDatabaseFactory.BuildConfig(_dbPath));
         services.AddSingleton<IVectorDatabase>(_db);
         services.AddSingleton<IEmbeddingService>(_embedding.Object);
         services.AddSingleton<IKeywordIndex>(_keywordIndex.Object);

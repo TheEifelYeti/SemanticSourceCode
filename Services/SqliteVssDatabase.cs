@@ -1,6 +1,6 @@
 using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using SemanticSourceCode.Data;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Search;
 using System.Globalization;
@@ -9,113 +9,38 @@ namespace SemanticSourceCode.Services;
 
 public class SqliteVssDatabase : IVectorDatabase
 {
-    private readonly string _dbPath;
+    private readonly ISqliteConnectionFactory _factory;
+    private readonly IDatabaseInitializer _initializer;
     private readonly ILogger<SqliteVssDatabase>? _logger;
-    private bool _isInitialized = false;
     private bool _vecLoaded = false;
     private int? _embeddingDimensions;
 
-    public SqliteVssDatabase(IConfiguration configuration, ILogger<SqliteVssDatabase>? logger = null)
+    public SqliteVssDatabase(
+        ISqliteConnectionFactory factory,
+        IDatabaseInitializer initializer,
+        ILogger<SqliteVssDatabase>? logger = null)
     {
+        _factory = factory ?? throw new ArgumentNullException(nameof(factory));
+        _initializer = initializer ?? throw new ArgumentNullException(nameof(initializer));
         _logger = logger;
-        _dbPath = configuration["Database:Path"] ?? "codechunks.db";
     }
 
     public async Task InitializeAsync()
     {
-        if (_isInitialized) return;
+        await _initializer.EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
-
-        // Try to load sqlite-vec extension for vector search
-        await TryLoadVecExtensionAsync(connection);
-
-        // Create table for code chunks
-        var createTableCmd = @"
-            CREATE TABLE IF NOT EXISTS CodeChunks (
-                Id TEXT PRIMARY KEY,
-                FilePath TEXT NOT NULL,
-                NamespaceName TEXT NOT NULL,
-                ClassName TEXT NOT NULL,
-                MemberName TEXT NOT NULL,
-                MemberType TEXT NOT NULL,
-                Content TEXT NOT NULL,
-                Signature TEXT NOT NULL,
-                Documentation TEXT NOT NULL,
-                StartLine INTEGER NOT NULL,
-                EndLine INTEGER NOT NULL,
-                Embedding BLOB,
-                IndexedAt TEXT NOT NULL,
-                ContentHash TEXT NOT NULL DEFAULT '',
-                IsController INTEGER DEFAULT 0,
-                IsService INTEGER DEFAULT 0,
-                IsMiddleware INTEGER DEFAULT 0,
-                HttpMethods TEXT,
-                RouteTemplate TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_filepath ON CodeChunks(FilePath);
-            CREATE INDEX IF NOT EXISTS idx_classname ON CodeChunks(ClassName);
-            CREATE INDEX IF NOT EXISTS idx_membertype ON CodeChunks(MemberType);
-
-            -- Backward-compatible migration: add new columns if they don't exist
-            SELECT CASE WHEN EXISTS(SELECT 1 FROM pragma_table_info('CodeChunks') WHERE name = 'IsController') THEN 1 ELSE 0 END;
-            ALTER TABLE CodeChunks ADD COLUMN IsController INTEGER DEFAULT 0;
-            ALTER TABLE CodeChunks ADD COLUMN IsService INTEGER DEFAULT 0;
-            ALTER TABLE CodeChunks ADD COLUMN IsMiddleware INTEGER DEFAULT 0;
-            ALTER TABLE CodeChunks ADD COLUMN HttpMethods TEXT;
-            ALTER TABLE CodeChunks ADD COLUMN RouteTemplate TEXT;
-
-            -- Keyword index for hybrid search
-            -- Note: Using regular table instead of FTS5 for backward compatibility
-            -- (FTS5 may not be available in all SQLite builds)
-            CREATE TABLE IF NOT EXISTS KeywordIndex (
-                Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ChunkId TEXT NOT NULL,
-                Term TEXT NOT NULL,
-                Weight REAL NOT NULL DEFAULT 1.0,
-                IndexedAt TEXT NOT NULL,
-                FOREIGN KEY (ChunkId) REFERENCES CodeChunks(Id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_keyword_term ON KeywordIndex(Term);
-            CREATE INDEX IF NOT EXISTS idx_keyword_chunk ON KeywordIndex(ChunkId);
-
-            CREATE TABLE IF NOT EXISTS CallEdges (
-                Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                SourceChunkId TEXT NOT NULL,
-                TargetChunkId TEXT NOT NULL,
-                CallType TEXT NOT NULL,
-                LineNumber INTEGER,
-                FOREIGN KEY (SourceChunkId) REFERENCES CodeChunks(Id),
-                FOREIGN KEY (TargetChunkId) REFERENCES CodeChunks(Id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_caller ON CallEdges(SourceChunkId);
-            CREATE INDEX IF NOT EXISTS idx_callee ON CallEdges(TargetChunkId);
-        ";
-
-        using var command = new SqliteCommand(createTableCmd, connection);
-        await command.ExecuteNonQueryAsync();
-
-        // Backward-compatible migration: add new columns if they don't exist
-        await TryAddColumnAsync(connection, "CodeChunks", "IsController", "INTEGER DEFAULT 0");
-        await TryAddColumnAsync(connection, "CodeChunks", "IsService", "INTEGER DEFAULT 0");
-        await TryAddColumnAsync(connection, "CodeChunks", "IsMiddleware", "INTEGER DEFAULT 0");
-        await TryAddColumnAsync(connection, "CodeChunks", "HttpMethods", "TEXT");
-        await TryAddColumnAsync(connection, "CodeChunks", "RouteTemplate", "TEXT");
-        await TryAddColumnAsync(connection, "CodeChunks", "ContentHash", "TEXT NOT NULL DEFAULT ''");
-
-        // Create vec0 virtual table for ANN vector search if extension loaded
+        // Probe the vec extension on an already-initialised database so we
+        // can recreate the vec0 virtual table with the right dimensions.
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
+        await TryLoadVecExtensionAsync(connection).ConfigureAwait(false);
         if (_vecLoaded)
         {
-            await CreateVecVirtualTableAsync(connection, _embeddingDimensions);
+            await CreateVecVirtualTableAsync(connection, _embeddingDimensions).ConfigureAwait(false);
         }
 
-        _isInitialized = true;
-        _logger?.LogInformation("Database initialized at {Path} (vec0: {VecStatus})", _dbPath, _vecLoaded ? "enabled" : "fallback");
+        _logger?.LogInformation(
+            "Database ready at {Path} (vec0: {VecStatus})",
+            _factory.DatabasePath, _vecLoaded ? "enabled" : "fallback");
     }
 
     private async Task TryLoadVecExtensionAsync(SqliteConnection connection)
@@ -124,7 +49,7 @@ public class SqliteVssDatabase : IVectorDatabase
         {
             // Enable extension loading
             using var enableCmd = new SqliteCommand("SELECT load_extension('vec0')", connection);
-            await enableCmd.ExecuteNonQueryAsync();
+            await enableCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             _vecLoaded = true;
             _logger?.LogInformation("sqlite-vec extension loaded successfully");
         }
@@ -143,7 +68,7 @@ public class SqliteVssDatabase : IVectorDatabase
             var dropCmd = "DROP TABLE IF EXISTS vec_embeddings;";
             using (var cmd = new SqliteCommand(dropCmd, connection))
             {
-                await cmd.ExecuteNonQueryAsync();
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             }
 
             // Create vec0 virtual table with dynamic dimensions
@@ -156,7 +81,7 @@ public class SqliteVssDatabase : IVectorDatabase
             ";
             using (var cmd = new SqliteCommand(createVecCmd, connection))
             {
-                await cmd.ExecuteNonQueryAsync();
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             }
             _logger?.LogInformation("vec0 virtual table created for ANN search with {Dim} dimensions", dim);
         }
@@ -167,26 +92,11 @@ public class SqliteVssDatabase : IVectorDatabase
         }
     }
 
-    private async Task TryAddColumnAsync(SqliteConnection connection, string table, string column, string type)
-    {
-        try
-        {
-            using var cmd = new SqliteCommand($"ALTER TABLE {table} ADD COLUMN {column} {type};", connection);
-            await cmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1) // duplicate column name
-        {
-            // Column already exists — this is expected on subsequent runs
-        }
-    }
-
     public async Task InsertChunkAsync(CodeChunk chunk)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         var insertCmd = @"
             INSERT OR REPLACE INTO CodeChunks 
@@ -214,12 +124,12 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@HttpMethods", chunk.HttpMethods ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("@RouteTemplate", chunk.RouteTemplate ?? (object)DBNull.Value);
 
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
 
         // Also insert into vec0 virtual table for ANN search
         if (_vecLoaded && chunk.Embedding != null && chunk.Embedding.Length > 0)
         {
-            await InsertVecEmbeddingAsync(connection, chunk);
+            await InsertVecEmbeddingAsync(connection, chunk).ConfigureAwait(false);
         }
     }
 
@@ -228,20 +138,20 @@ public class SqliteVssDatabase : IVectorDatabase
         try
         {
             var embeddingFloats = ConvertByteArrayToFloatArray(chunk.Embedding!);
-            
+
             // Detect embedding dimensions from first chunk
             if (_embeddingDimensions == null)
             {
                 _embeddingDimensions = embeddingFloats.Length;
                 _logger?.LogInformation("Detected embedding dimensions: {Dimensions}", _embeddingDimensions);
-                
+
                 // Recreate vec table with correct dimensions
-                await RecreateVecTableWithDimensionsAsync(connection, _embeddingDimensions.Value);
+                await RecreateVecTableWithDimensionsAsync(connection, _embeddingDimensions.Value).ConfigureAwait(false);
             }
 
             // Convert floats to JSON array for vec0
             var embeddingJson = "[" + string.Join(",", embeddingFloats.Select(f => f.ToString("G9", CultureInfo.InvariantCulture))) + "]";
-            
+
             var insertVecCmd = @"
                 INSERT INTO vec_embeddings (embedding, chunk_id) 
                 VALUES (json(?), ?)
@@ -251,8 +161,8 @@ public class SqliteVssDatabase : IVectorDatabase
             command.Parameters.AddWithValue("@embedding", embeddingJson);
             command.Parameters.AddWithValue("@chunk_id", chunk.Id);
             command.Parameters.AddWithValue("@embedding_update", embeddingJson);
-            
-            await command.ExecuteNonQueryAsync();
+
+            await command.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -267,7 +177,7 @@ public class SqliteVssDatabase : IVectorDatabase
             var dropCmd = "DROP TABLE IF EXISTS vec_embeddings;";
             using (var cmd = new SqliteCommand(dropCmd, connection))
             {
-                await cmd.ExecuteNonQueryAsync();
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             }
 
             var createCmd = $@"
@@ -275,12 +185,12 @@ public class SqliteVssDatabase : IVectorDatabase
                     embedding FLOAT[{dimensions}] distance_metric=cosine,
                     chunk_id TEXT
                 );";
-            
+
             using (var cmd = new SqliteCommand(createCmd, connection))
             {
-                await cmd.ExecuteNonQueryAsync();
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             }
-            
+
             _logger?.LogInformation("Recreated vec_embeddings table with {Dimensions} dimensions", dimensions);
         }
         catch (Exception ex)
@@ -294,7 +204,7 @@ public class SqliteVssDatabase : IVectorDatabase
     {
         foreach (var chunk in chunks)
         {
-            await InsertChunkAsync(chunk);
+            await InsertChunkAsync(chunk).ConfigureAwait(false);
         }
     }
 
@@ -363,7 +273,7 @@ public class SqliteVssDatabase : IVectorDatabase
 
     public async Task<List<(CodeChunk Chunk, float Similarity)>> SearchSimilarWithScoresAsync(float[] queryEmbedding, int topK = 5)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
         if (queryEmbedding == null || queryEmbedding.Length == 0)
         {
@@ -376,7 +286,7 @@ public class SqliteVssDatabase : IVectorDatabase
         {
             try
             {
-                return await SearchWithVecAsync(queryEmbedding, topK);
+                return await SearchWithVecAsync(queryEmbedding, topK).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -386,17 +296,15 @@ public class SqliteVssDatabase : IVectorDatabase
         }
 
         // Fallback: in-memory cosine similarity
-        return await SearchWithCosineFallbackAsync(queryEmbedding, topK);
+        return await SearchWithCosineFallbackAsync(queryEmbedding, topK).ConfigureAwait(false);
     }
 
     private async Task<List<(CodeChunk Chunk, float Similarity)>> SearchWithVecAsync(float[] queryEmbedding, int topK)
     {
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         var embeddingJson = "[" + string.Join(",", queryEmbedding.Select(f => f.ToString("G9", CultureInfo.InvariantCulture))) + "]";
-        
+
         // vec0 uses MATCH operator with KNN
         var selectCmd = $@"
             SELECT 
@@ -413,13 +321,13 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@match", embeddingJson);
 
         var results = new List<(CodeChunk Chunk, float Similarity)>();
-        
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+
+        using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
         {
             var distance = reader.GetDouble(0); // distance is first column
             var similarity = (float)(1.0 - distance); // Convert cosine distance to similarity
-            
+
             var chunk = ReadChunkFromReader(reader, 1); // offset by 1 for distance column
             results.Add((chunk, similarity));
         }
@@ -431,27 +339,25 @@ public class SqliteVssDatabase : IVectorDatabase
     private async Task<List<(CodeChunk Chunk, float Similarity)>> SearchWithCosineFallbackAsync(float[] queryEmbedding, int topK)
     {
         _logger?.LogDebug("Using in-memory cosine similarity fallback");
-        
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         var selectCmd = "SELECT * FROM CodeChunks WHERE Embedding IS NOT NULL AND LENGTH(Embedding) > 0";
         using var command = new SqliteCommand(selectCmd, connection);
-        
+
         var results = new List<(CodeChunk Chunk, float Similarity)>();
-        
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+
+        using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
         {
             var embeddingBytes = reader.GetFieldValue<byte[]>(11);
             if (embeddingBytes == null || embeddingBytes.Length == 0) continue;
 
             var chunkEmbedding = ConvertByteArrayToFloatArray(embeddingBytes);
             var similarity = CosineSimilarity(queryEmbedding, chunkEmbedding);
-            
+
             var chunk = ReadChunkFromReader(reader);
-            
+
             results.Add((chunk, similarity));
         }
 
@@ -470,21 +376,26 @@ public class SqliteVssDatabase : IVectorDatabase
 
     public async Task ClearDatabaseAsync()
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         using var command = new SqliteCommand("DELETE FROM CodeChunks", connection);
-        await command.ExecuteNonQueryAsync();
-        
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+
         _logger?.LogInformation("Database cleared");
     }
 
     public Task<bool> IsInitializedAsync()
     {
-        return Task.FromResult(_isInitialized);
+        // Schema lifecycle is now owned by IDatabaseInitializer. The
+        // IVectorDatabase contract keeps this method for backwards
+        // compatibility, but the schema is always considered initialised
+        // by the time a service runs an operation against it (the
+        // initializer is invoked lazily on every entry point). Always
+        // returning true preserves the post-refactor invariant that any
+        // successful DB call implies the schema is up to date.
+        return Task.FromResult(true);
     }
 
     /// <summary>
@@ -493,16 +404,14 @@ public class SqliteVssDatabase : IVectorDatabase
     /// </summary>
     public async Task<Dictionary<string, string>> GetAllContentHashesAsync()
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
         var result = new Dictionary<string, string>();
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         using var command = new SqliteCommand("SELECT Id, ContentHash FROM CodeChunks", connection);
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
         {
             result[reader.GetString(0)] = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
         }
@@ -516,18 +425,16 @@ public class SqliteVssDatabase : IVectorDatabase
     /// <returns>The number of files whose chunks were removed.</returns>
     public async Task<int> DeleteChunksForNonExistentFilesAsync()
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         // Step 1: Find all distinct file paths currently in the DB
         var filesInDb = new List<string>();
         using (var selectCmd = new SqliteCommand("SELECT DISTINCT FilePath FROM CodeChunks", connection))
         {
-            using var reader = await selectCmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await selectCmd.ExecuteReaderAsync().ConfigureAwait(false);
+            while (await reader.ReadAsync().ConfigureAwait(false))
             {
                 filesInDb.Add(reader.GetString(0));
             }
@@ -546,7 +453,7 @@ public class SqliteVssDatabase : IVectorDatabase
             using var deleteChunksCmd = new SqliteCommand(
                 "DELETE FROM CodeChunks WHERE FilePath = @FilePath", connection);
             deleteChunksCmd.Parameters.AddWithValue("@FilePath", file);
-            await deleteChunksCmd.ExecuteNonQueryAsync();
+            await deleteChunksCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             _logger?.LogInformation("Removed chunks for missing file: {FilePath}", file);
         }
 
@@ -558,7 +465,7 @@ public class SqliteVssDatabase : IVectorDatabase
                 using var cleanupVecCmd = new SqliteCommand(@"
                     DELETE FROM vec_embeddings
                     WHERE chunk_id NOT IN (SELECT Id FROM CodeChunks)", connection);
-                await cleanupVecCmd.ExecuteNonQueryAsync();
+                await cleanupVecCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -573,7 +480,7 @@ public class SqliteVssDatabase : IVectorDatabase
                 DELETE FROM CallEdges
                 WHERE SourceChunkId NOT IN (SELECT Id FROM CodeChunks)
                    OR TargetChunkId NOT IN (SELECT Id FROM CodeChunks)", connection);
-            await cleanupEdgesCmd.ExecuteNonQueryAsync();
+            await cleanupEdgesCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
         {
@@ -592,16 +499,14 @@ public class SqliteVssDatabase : IVectorDatabase
     /// <returns>The number of chunks that were removed.</returns>
     public async Task<int> DeleteChunksByFilePathAsync(string filePath)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
         if (string.IsNullOrWhiteSpace(filePath))
         {
             return 0;
         }
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         // Step 1: Count how many chunks we're about to delete (for return value + log)
         int deletedCount;
@@ -609,7 +514,7 @@ public class SqliteVssDatabase : IVectorDatabase
             "SELECT COUNT(*) FROM CodeChunks WHERE FilePath = @FilePath", connection))
         {
             countCmd.Parameters.AddWithValue("@FilePath", filePath);
-            var countResult = await countCmd.ExecuteScalarAsync();
+            var countResult = await countCmd.ExecuteScalarAsync().ConfigureAwait(false);
             deletedCount = countResult == null ? 0 : Convert.ToInt32(countResult);
         }
 
@@ -623,7 +528,7 @@ public class SqliteVssDatabase : IVectorDatabase
             "DELETE FROM CodeChunks WHERE FilePath = @FilePath", connection))
         {
             deleteChunksCmd.Parameters.AddWithValue("@FilePath", filePath);
-            await deleteChunksCmd.ExecuteNonQueryAsync();
+            await deleteChunksCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
 
         // Step 3: Clean up orphaned vec_embeddings (sqlite-vec has no ON DELETE CASCADE)
@@ -634,7 +539,7 @@ public class SqliteVssDatabase : IVectorDatabase
                 using var cleanupVecCmd = new SqliteCommand(@"
                     DELETE FROM vec_embeddings
                     WHERE chunk_id NOT IN (SELECT Id FROM CodeChunks)", connection);
-                await cleanupVecCmd.ExecuteNonQueryAsync();
+                await cleanupVecCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -649,7 +554,7 @@ public class SqliteVssDatabase : IVectorDatabase
                 DELETE FROM CallEdges
                 WHERE SourceChunkId NOT IN (SELECT Id FROM CodeChunks)
                    OR TargetChunkId NOT IN (SELECT Id FROM CodeChunks)", connection);
-            await cleanupEdgesCmd.ExecuteNonQueryAsync();
+            await cleanupEdgesCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
         {
@@ -663,17 +568,15 @@ public class SqliteVssDatabase : IVectorDatabase
 
     public async Task<IReadOnlyList<CodeChunk>> GetAllChunksAsync(CancellationToken ct = default)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await _factory.OpenAsync(ct).ConfigureAwait(false);
 
         using var command = new SqliteCommand("SELECT * FROM CodeChunks", connection);
         var results = new List<CodeChunk>();
 
-        using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
             results.Add(ReadChunkFromReader(reader));
         }
@@ -683,8 +586,7 @@ public class SqliteVssDatabase : IVectorDatabase
 
     private async Task EnsureInitializedAsync()
     {
-        if (!_isInitialized)
-            await InitializeAsync();
+        await _initializer.EnsureInitializedAsync().ConfigureAwait(false);
     }
 
     private float[] ConvertByteArrayToFloatArray(byte[] bytes)
@@ -699,14 +601,14 @@ public class SqliteVssDatabase : IVectorDatabase
         if (a.Length != b.Length)
         {
             _logger?.LogWarning("Embedding dimension mismatch: query={QueryDim}, chunk={ChunkDim}. Truncating to minimum.", a.Length, b.Length);
-            
+
             // Truncate to minimum length
             var minLength = Math.Min(a.Length, b.Length);
             var aTruncated = new float[minLength];
             var bTruncated = new float[minLength];
             Array.Copy(a, aTruncated, minLength);
             Array.Copy(b, bTruncated, minLength);
-            
+
             a = aTruncated;
             b = bTruncated;
         }
@@ -733,11 +635,9 @@ public class SqliteVssDatabase : IVectorDatabase
     /// </summary>
     public async Task AddCallEdgeAsync(string sourceChunkId, string targetChunkId, string callType, int lineNumber)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         var insertCmd = @"
             INSERT OR IGNORE INTO CallEdges (SourceChunkId, TargetChunkId, CallType, LineNumber)
@@ -749,7 +649,7 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@CallType", callType);
         command.Parameters.AddWithValue("@LineNumber", lineNumber);
 
-        await command.ExecuteNonQueryAsync();
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -757,11 +657,9 @@ public class SqliteVssDatabase : IVectorDatabase
     /// </summary>
     public async Task<List<CodeChunk>> GetCallersAsync(string chunkId)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         var selectCmd = @"
             SELECT c.* FROM CodeChunks c
@@ -773,8 +671,8 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@ChunkId", chunkId);
 
         var results = new List<CodeChunk>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
         {
             results.Add(ReadChunkFromReader(reader));
         }
@@ -787,11 +685,9 @@ public class SqliteVssDatabase : IVectorDatabase
     /// </summary>
     public async Task<List<CodeChunk>> GetCalleesAsync(string chunkId)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
-        var connectionString = $"Data Source={_dbPath};";
-        using var connection = new SqliteConnection(connectionString);
-        await connection.OpenAsync();
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
 
         var selectCmd = @"
             SELECT c.* FROM CodeChunks c
@@ -803,8 +699,8 @@ public class SqliteVssDatabase : IVectorDatabase
         command.Parameters.AddWithValue("@ChunkId", chunkId);
 
         var results = new List<CodeChunk>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
         {
             results.Add(ReadChunkFromReader(reader));
         }
@@ -817,7 +713,7 @@ public class SqliteVssDatabase : IVectorDatabase
     /// </summary>
     public async Task<List<CodeChunk>> GetImpactRadiusAsync(string chunkId, int maxDepth = 3)
     {
-        await EnsureInitializedAsync();
+        await EnsureInitializedAsync().ConfigureAwait(false);
 
         var visited = new HashSet<string>();
         var results = new List<CodeChunk>();
@@ -827,13 +723,13 @@ public class SqliteVssDatabase : IVectorDatabase
         while (queue.Count > 0)
         {
             var (currentId, depth) = queue.Dequeue();
-            
+
             if (depth >= maxDepth || visited.Contains(currentId))
                 continue;
-                
+
             visited.Add(currentId);
 
-            var callers = await GetCallersAsync(currentId);
+            var callers = await GetCallersAsync(currentId).ConfigureAwait(false);
             foreach (var caller in callers)
             {
                 if (!visited.Contains(caller.Id))

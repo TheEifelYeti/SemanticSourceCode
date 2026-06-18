@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Services;
+using SemanticSourceCode.Tests.Data;
 using Xunit;
 
 namespace SemanticSourceCode.Tests.Services;
@@ -22,13 +23,7 @@ public class WatchModeDatabaseTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _dbPath = Path.Combine(_tempDir, "test.db");
 
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Database:Path"] = _dbPath
-            })
-            .Build();
-        _db = new SqliteVssDatabase(config, Mock.Of<ILogger<SqliteVssDatabase>>());
+        _db = TestDatabaseFactory.BuildSqliteVssDatabase(_dbPath, Mock.Of<ILogger<SqliteVssDatabase>>());
     }
 
     public void Dispose()
