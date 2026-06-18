@@ -1,6 +1,7 @@
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Search;
 using SemanticSourceCode.Services;
+using SemanticSourceCode.Tests.Data;
 using Microsoft.Extensions.Configuration;
 using Xunit;
 
@@ -14,14 +15,7 @@ public class SearchFilterTests : IDisposable
     public SearchFilterTests()
     {
         _testDbPath = Path.Combine(Path.GetTempPath(), $"test_filter_{Guid.NewGuid()}.db");
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Database:Path"] = _testDbPath
-            })
-            .Build();
-
-        _database = new SqliteVssDatabase(config);
+        _database = TestDatabaseFactory.BuildSqliteVssDatabase(_testDbPath);
     }
 
     public void Dispose()

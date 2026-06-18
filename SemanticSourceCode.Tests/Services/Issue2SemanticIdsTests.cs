@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using SemanticSourceCode.Models;
 using SemanticSourceCode.Services;
+using SemanticSourceCode.Tests.Data;
 using Xunit;
 
 namespace SemanticSourceCode.Tests.Services;
@@ -19,14 +20,7 @@ public class Issue2SemanticIdsTests : IDisposable
     public Issue2SemanticIdsTests()
     {
         _testDbPath = Path.Combine(Path.GetTempPath(), $"issue2_{Guid.NewGuid()}.db");
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Database:Path"] = _testDbPath
-            })
-            .Build();
-
-        _database = new SqliteVssDatabase(config);
+        _database = TestDatabaseFactory.BuildSqliteVssDatabase(_testDbPath);
     }
 
     public void Dispose()
