@@ -307,8 +307,11 @@ public class DatabaseInitializerTests : IDisposable
         // more — schema is owned exclusively by DatabaseInitializer.
         // Otherwise we're back to the duplicated-init bug that motivated
         // this issue.
+        // AppContext.BaseDirectory points to SemanticSourceCode.Tests/bin/<cfg>/<tfm>/,
+        // so four '..' steps land on the repo root (which contains
+        // both Services/ and Search/).
         var repoRoot = Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+            AppContext.BaseDirectory, "..", "..", "..", ".."));
         var servicesDir = Path.Combine(repoRoot, "Services");
         var searchDir = Path.Combine(repoRoot, "Search");
 
