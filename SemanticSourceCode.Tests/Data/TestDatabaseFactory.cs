@@ -53,10 +53,10 @@ public static class TestDatabaseFactory
 
     /// <summary>
     /// Builds a fresh <see cref="SqliteVssDatabase"/> with an explicit
-    /// <see cref="ILogger{TCategoryName}"/>. Replaces the old
+    /// logger. Replaces the old
     /// <c>new SqliteVssDatabase(config, logger)</c> call in tests.
     /// </summary>
-    public static SqliteVssDatabase BuildSqliteVssDatabase<T>(string dbPath, ILogger<T> logger)
+    public static SqliteVssDatabase BuildSqliteVssDatabase(string dbPath, ILogger<SqliteVssDatabase> logger)
     {
         var (factory, initializer) = BuildFactory(dbPath);
         return new SqliteVssDatabase(factory, initializer, logger);
@@ -76,9 +76,9 @@ public static class TestDatabaseFactory
 
     /// <summary>
     /// Same as <see cref="BuildKeywordIndexService(string)"/> but with an
-    /// explicit <see cref="ILogger{TCategoryName}"/>.
+    /// explicit logger.
     /// </summary>
-    public static KeywordIndexService BuildKeywordIndexService<T>(string dbPath, ILogger<T> logger)
+    public static KeywordIndexService BuildKeywordIndexService(string dbPath, ILogger<KeywordIndexService> logger)
     {
         var (factory, initializer) = BuildFactory(dbPath);
         return new KeywordIndexService(factory, initializer, logger);
