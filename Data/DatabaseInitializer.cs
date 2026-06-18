@@ -53,7 +53,11 @@ public class DatabaseInitializer : IDatabaseInitializer
         // used before this initializer existed: CodeChunks with all current
         // columns, KeywordIndex, CallEdges, plus their indexes and a
         // back-compat ALTER for columns that may be missing on legacy DBs.
-        new Migration(1, MigrationKind.SchemaBaseline, BuildV1BaselineSql)
+        new Migration(
+            1,
+            MigrationKind.SchemaBaseline,
+            "Baseline schema: CodeChunks (all columns including IsController/IsService/IsMiddleware/HttpMethods/RouteTemplate/ContentHash), KeywordIndex, CallEdges + indexes. Adds legacy ALTER TABLE fallbacks for pre-Issue #2 databases.",
+            BuildV1BaselineSql)
     };
 
     /// <summary>
@@ -95,23 +99,23 @@ public class DatabaseInitializer : IDatabaseInitializer
             {
                 // No version row yet. Either this is a fresh DB, or a legacy
                 // DB created before this initializer existed. Detect legacy
-                // state and treat it as already-at-version-1 so we don't
-                // re-run the baseline migration on it (the baseline SQL is
-                // idempotent, but skipping avoids needless I/O and avoids
-                // any subtle surprises on weird legacy schemas).
+                // state for telemetry; the v1 migration is idempotent and
+                // safe to run either way, so we don't need to special-case
+                // it. Legacy DBs that are missing any table or column will
+                // be brought up to date by the same path as fresh DBs.
                 if (await TableExistsAsync(connection, "CodeChunks", ct).ConfigureAwait(false))
                 {
                     _logger?.LogInformation(
-                        "Detected legacy database (CodeChunks exists, no __SchemaVersion row). Marking as version 1.");
-                    _currentVersion = 1;
-                    await RecordVersionAsync(connection, 1, ct).ConfigureAwait(false);
+                        "Detected legacy database (CodeChunks exists, no __SchemaVersion row). Applying baseline migration to backfill any missing tables/columns.");
                 }
             }
 
             // Apply any pending migrations in order.
             foreach (var migration in Migrations.Where(m => m.Version > _currentVersion))
             {
-                _logger?.LogInformation("Applying database migration v{Version}", migration.Version);
+                _logger?.LogInformation(
+                    "Applying database migration v{Version}: {Description}",
+                    migration.Version, migration.Description);
                 await migration.ApplyAsync(connection, _logger, ct).ConfigureAwait(false);
                 _currentVersion = migration.Version;
                 await RecordVersionAsync(connection, migration.Version, ct).ConfigureAwait(false);
@@ -305,6 +309,7 @@ public class DatabaseInitializer : IDatabaseInitializer
 public sealed record Migration(
     int Version,
     MigrationKind Kind,
+    string Description,
     Func<SqliteConnection, ILogger?, CancellationToken, Task> ApplyAsync);
 
 /// <summary>

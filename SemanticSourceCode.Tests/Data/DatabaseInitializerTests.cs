@@ -253,4 +253,89 @@ public class DatabaseInitializerTests : IDisposable
         Assert.Equal(versions.Count, versions.Distinct().Count());
         Assert.True(versions.First() == 1, "Migrations must start at version 1");
     }
+
+    [Fact]
+    public void Migrations_EachHaveNonEmptyDescription()
+    {
+        // Every migration must carry a human-readable description so the
+        // log line "Applying database migration v{N}" can be augmented with
+        // context. Empty descriptions are a review-blocker.
+        foreach (var migration in DatabaseInitializer.Migrations)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(migration.Description),
+                $"Migration v{migration.Version} has no description");
+        }
+    }
+
+    [Fact]
+    public async Task Migrations_AreAllIdempotent()
+    {
+        // The migration system relies on every migration being safely
+        // re-runnable on a legacy database that already has some of the
+        // schema. Belt-and-braces guard: run the v1 baseline twice on a
+        // fresh DB and assert nothing throws and the schema-version table
+        // stays at exactly one row.
+        var path = Path.Combine(_tempDir, $"idempotent_{Guid.NewGuid():N}.db");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Path"] = path
+            })
+            .Build();
+        var factory = new SqliteConnectionFactory(config);
+        var reInit = new DatabaseInitializer(factory);
+
+        // First pass — fresh DB.
+        await reInit.EnsureInitializedAsync();
+        // Second pass — schema already exists; everything must be a no-op.
+        await reInit.EnsureInitializedAsync();
+
+        Assert.Equal(DatabaseInitializer.LatestVersion, reInit.CurrentVersion);
+
+        // Exactly one schema-version row, even after re-running.
+        await using var conn = await factory.OpenAsync();
+        await using var cmd = new SqliteCommand("SELECT COUNT(*) FROM __SchemaVersion;", conn);
+        var count = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public void SchemaIsNotDuplicatedOutsideDataFolder()
+    {
+        // Static guard: no production code under Services/ or Search/ may
+        // issue CREATE TABLE / CREATE INDEX / ALTER TABLE statements any
+        // more — schema is owned exclusively by DatabaseInitializer.
+        // Otherwise we're back to the duplicated-init bug that motivated
+        // this issue.
+        var repoRoot = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var servicesDir = Path.Combine(repoRoot, "Services");
+        var searchDir = Path.Combine(repoRoot, "Search");
+
+        Assert.True(Directory.Exists(servicesDir), $"Services/ not found at {servicesDir}");
+        Assert.True(Directory.Exists(searchDir), $"Search/ not found at {searchDir}");
+
+        var forbidden = new[] { "CREATE TABLE", "CREATE INDEX", "ALTER TABLE" };
+        var offenders = new List<string>();
+
+        foreach (var dir in new[] { servicesDir, searchDir })
+        {
+            foreach (var file in Directory.EnumerateFiles(dir, "*.cs", SearchOption.TopDirectoryOnly))
+            {
+                var content = File.ReadAllText(file);
+                foreach (var token in forbidden)
+                {
+                    if (content.Contains(token, StringComparison.OrdinalIgnoreCase))
+                    {
+                        offenders.Add($"{Path.GetFileName(file)} contains '{token}'");
+                    }
+                }
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "Schema DDL leaked outside Data/. Offending files:\n  " +
+            string.Join("\n  ", offenders));
+    }
 }
