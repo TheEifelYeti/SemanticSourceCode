@@ -4,7 +4,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
-![Tests](https://img.shields.io/badge/Tests-207%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-224%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
 ## Highlights
