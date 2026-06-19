@@ -130,6 +130,7 @@ public static class IndexCommand
         }
 
         var processed = 0;
+        var success = true;
         try
         {
             await database.InsertChunksAsync(chunksToPersist).ConfigureAwait(false);
@@ -142,11 +143,12 @@ public static class IndexCommand
         {
             logger.LogError(ex, "Error during bulk insert of {Count} chunks",
                 chunksToPersist.Count);
+            success = false;
         }
 
         logger.LogInformation("Successfully indexed {Processed} code chunks ({Skipped} unchanged).",
             processed, skippedCount);
-        return 0;
+        return success ? 0 : 1;
     }
 
     private static byte[] ConvertFloatArrayToByteArray(float[] floats)

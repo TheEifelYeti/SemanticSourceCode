@@ -211,6 +211,53 @@ public class Issue3HybridSearchTests
         }
     }
 
+    [Fact]
+    public async Task IndexCommand_BulkInsertThrows_ReturnsExitCodeOne()
+    {
+        // Regression test for the BLOCKER found in Issue #21 code review:
+        // previously the catch block in ProcessChunksAsync logged the error but
+        // still returned 0, masking bulk-insert failures from the CLI caller.
+
+        // Arrange
+        var chunks = new List<CodeChunk> { CreateTestChunk("boom-1") };
+        var analyzer = new Mock<ICodeAnalyzer>();
+        analyzer.Setup(a => a.AnalyzeDirectoryAsync(It.IsAny<string>(), It.IsAny<string>()))
+                .ReturnsAsync(chunks);
+
+        var embeddingService = new Mock<IEmbeddingService>();
+        embeddingService.Setup(e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+                        .ReturnsAsync((IEnumerable<string> texts, CancellationToken _) =>
+                            texts.Select(_ => new float[] { 0.1f, 0.2f, 0.3f }).ToArray());
+
+        var database = new Mock<IVectorDatabase>();
+        database.Setup(d => d.IsInitializedAsync()).ReturnsAsync(true);
+        database.Setup(d => d.GetAllContentHashesAsync()).ReturnsAsync(new Dictionary<string, string>());
+        database.Setup(d => d.InsertChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()))
+                .ThrowsAsync(new InvalidOperationException("simulated bulk-insert failure"));
+
+        var keywordIndex = new Mock<IKeywordIndex>();
+        keywordIndex.Setup(k => k.IsAvailableAsync()).ReturnsAsync(true);
+
+        var tempDir = Path.Combine(Path.GetTempPath(), $"idx_{Guid.NewGuid()}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var sp = BuildServiceProvider(analyzer.Object, embeddingService.Object,
+                database.Object, keywordIndex.Object);
+            var logger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("Test");
+
+            // Act
+            var exitCode = await IndexCommand.RunAsync(sp, tempDir, logger);
+
+            // Assert — caller must see the failure.
+            Assert.Equal(1, exitCode);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     // ---------- SearchCommand: hybrid search is used ----------
 
     [Fact]
