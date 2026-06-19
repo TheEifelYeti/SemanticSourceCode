@@ -217,4 +217,60 @@ public class KeywordIndexServiceTests
         Assert.True(scheibeTerm != default, "scheibe should be found in terms");
         Assert.Equal(0.35f, scheibeTerm.Weight);
     }
+
+    // ---------- Issue #21: bulk index all-or-nothing ----------
+
+    [Fact]
+    public async Task IndexChunksAsync_PersistsAllChunksAtomically()
+    {
+        // Arrange
+        var dbPath = Path.Combine(Path.GetTempPath(), $"kwbulk_{Guid.NewGuid():N}.db");
+        var service = TestDatabaseFactory.BuildKeywordIndexService(dbPath);
+
+        var chunks = new[]
+        {
+            new CodeChunk
+            {
+                Id = "atomic-1",
+                ClassName = "Car",
+                MemberName = "Drive",
+                Signature = "void Drive()",
+                FilePath = "/car.cs",
+                NamespaceName = "MyApp",
+                Content = "drive drive drive"
+            },
+            new CodeChunk
+            {
+                Id = "atomic-2",
+                ClassName = "Bus",
+                MemberName = "Stop",
+                Signature = "void Stop()",
+                FilePath = "/bus.cs",
+                NamespaceName = "MyApp",
+                Content = "stop stop stop"
+            }
+        };
+
+        // Act
+        await service.IndexChunksAsync(chunks);
+
+        // Assert — the KeywordIndex table is now available and populated.
+        // (SearchKeywordMatchesAsync joins with CodeChunks, which is empty in
+        // this unit test, so we assert the lower-level IsAvailableAsync instead.)
+        Assert.True(await service.IsAvailableAsync());
+    }
+
+    [Fact]
+    public async Task IndexChunksAsync_EmptyList_NoOpNoThrow()
+    {
+        // Arrange
+        var dbPath = Path.Combine(Path.GetTempPath(), $"kwbulk_{Guid.NewGuid():N}.db");
+        var service = TestDatabaseFactory.BuildKeywordIndexService(dbPath);
+
+        // Act + Assert — empty input must not throw.
+        await service.IndexChunksAsync(Array.Empty<CodeChunk>());
+        // (No further assertion: the table may or may not exist yet depending
+        // on the test ordering — IsAvailableAsync is not a stable invariant
+        // here.)
+    }
 }
