@@ -107,37 +107,41 @@ public static class IndexCommand
             return 1;
         }
 
-        // Attach embeddings + persist chunks. No further HTTP calls per chunk.
-        var processed = 0;
+        // Attach embeddings + persist chunks in bulk.
+        // Issue #21: use the single-transaction bulk APIs to avoid N
+        // connections / implicit transactions with their own fsync per chunk.
+        // Collect chunks with non-empty embeddings first; empty ones get skipped
+        // (and logged) without polluting the batch.
+        var chunksToPersist = new List<CodeChunk>(changedChunks.Count);
         for (int i = 0; i < changedChunks.Count; i++)
         {
             var chunk = changedChunks[i];
             var embedding = embeddings[i];
 
-            try
+            if (embedding == null || embedding.Length == 0)
             {
-                if (embedding == null || embedding.Length == 0)
-                {
-                    logger.LogWarning("Empty embedding for {FilePath} - {MemberName}. Skipping.",
-                        chunk.FilePath, chunk.MemberName);
-                    continue;
-                }
-
-                chunk.Embedding = ConvertFloatArrayToByteArray(embedding);
-                await database.InsertChunkAsync(chunk);
-                await keywordIndex.IndexChunkAsync(chunk);
-
-                processed++;
-                if (processed % 10 == 0)
-                {
-                    logger.LogInformation("Processed {Processed}/{Total} chunks...", processed, changedChunks.Count);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error processing {FilePath} - {MemberName}",
+                logger.LogWarning("Empty embedding for {FilePath} - {MemberName}. Skipping.",
                     chunk.FilePath, chunk.MemberName);
+                continue;
             }
+
+            chunk.Embedding = ConvertFloatArrayToByteArray(embedding);
+            chunksToPersist.Add(chunk);
+        }
+
+        var processed = 0;
+        try
+        {
+            await database.InsertChunksAsync(chunksToPersist).ConfigureAwait(false);
+            await keywordIndex.IndexChunksAsync(chunksToPersist).ConfigureAwait(false);
+            processed = chunksToPersist.Count;
+            logger.LogInformation("Processed {Processed}/{Total} chunks (single transaction)...",
+                processed, changedChunks.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error during bulk insert of {Count} chunks",
+                chunksToPersist.Count);
         }
 
         logger.LogInformation("Successfully indexed {Processed} code chunks ({Skipped} unchanged).",

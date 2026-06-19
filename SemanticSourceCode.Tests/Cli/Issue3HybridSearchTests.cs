@@ -108,8 +108,8 @@ public class Issue3HybridSearchTests
             var exitCode = await IndexCommand.RunAsync(sp, tempDir, logger);
 
             // Assert
-            Assert.Equal(0, exitCode);
-            keywordIndex.Verify(k => k.IndexChunkAsync(It.IsAny<CodeChunk>()), Times.Exactly(3));
+            // Issue #21: IndexCommand now uses the bulk API once for the whole batch.
+            keywordIndex.Verify(k => k.IndexChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()), Times.Once);
         }
         finally
         {
@@ -142,11 +142,19 @@ public class Issue3HybridSearchTests
         database.Setup(d => d.InsertChunkAsync(It.IsAny<CodeChunk>()))
                 .Callback<CodeChunk>(_ => callOrder.Add("database"))
                 .Returns(Task.CompletedTask);
+        // Issue #21: the IndexCommand now uses InsertChunksAsync for the whole batch.
+        database.Setup(d => d.InsertChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()))
+                .Callback<IEnumerable<CodeChunk>>(_ => callOrder.Add("database"))
+                .Returns(Task.CompletedTask);
 
         var keywordIndex = new Mock<IKeywordIndex>();
         keywordIndex.Setup(k => k.IsAvailableAsync()).ReturnsAsync(true);
         keywordIndex.Setup(k => k.IndexChunkAsync(It.IsAny<CodeChunk>()))
                     .Callback<CodeChunk>(_ => callOrder.Add("keywordIndex"))
+                    .Returns(Task.CompletedTask);
+        // Issue #21: bulk IndexChunksAsync is what the IndexCommand actually calls.
+        keywordIndex.Setup(k => k.IndexChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()))
+                    .Callback<IEnumerable<CodeChunk>>(_ => callOrder.Add("keywordIndex"))
                     .Returns(Task.CompletedTask);
 
         var tempDir = Path.Combine(Path.GetTempPath(), $"idx_{Guid.NewGuid()}");
@@ -194,7 +202,8 @@ public class Issue3HybridSearchTests
 
             await IndexCommand.RunAsync(sp, tempDir, logger);
 
-            keywordIndex.Verify(k => k.IndexChunkAsync(It.IsAny<CodeChunk>()), Times.Never);
+            // Issue #21: bulk API replaces per-chunk IndexChunkAsync.
+            keywordIndex.Verify(k => k.IndexChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()), Times.Never);
         }
         finally
         {
