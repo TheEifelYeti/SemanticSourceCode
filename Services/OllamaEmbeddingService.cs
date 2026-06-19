@@ -14,6 +14,7 @@ public class OllamaEmbeddingService : IEmbeddingService
 {
     private readonly HttpClient _httpClient;
     private readonly string _embeddingModel;
+    private readonly int _batchSize;
     private readonly ILogger<OllamaEmbeddingService>? _logger;
 
     /// <summary>
@@ -39,10 +40,16 @@ public class OllamaEmbeddingService : IEmbeddingService
         _httpClient.BaseAddress = new Uri(baseUrl);
         _httpClient.Timeout = TimeSpan.FromMinutes(5);
 
+        // Batch size for /api/embed requests. Default 32 matches Ollama's
+        // own recommendation and keeps payloads reasonable for large indexes.
+        var batchSizeStr = configuration["Embedding:BatchSize"];
+        _batchSize = int.TryParse(batchSizeStr, out var parsed) && parsed > 0 ? parsed : 32;
+
         // Verify model availability and auto-select fallback
         _embeddingModel = VerifyAndSelectModelAsync(configuredModel).GetAwaiter().GetResult();
 
-        _logger?.LogInformation("Ollama embedding service initialized with model: {Model}", _embeddingModel);
+        _logger?.LogInformation("Ollama embedding service initialized with model: {Model} (batch size: {BatchSize})",
+            _embeddingModel, _batchSize);
     }
 
     /// <summary>
@@ -200,19 +207,114 @@ public class OllamaEmbeddingService : IEmbeddingService
     /// <inheritdoc />
     public async Task<float[][]> GenerateEmbeddingsAsync(IEnumerable<string> texts, CancellationToken cancellationToken = default)
     {
-        var textList = texts.ToList();
-        _logger?.LogInformation("Generating embeddings for {Count} texts", textList.Count);
-        
-        var embeddings = new List<float[]>();
-        foreach (var text in textList)
+        var textList = texts.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+        if (textList.Count == 0)
         {
-            var embedding = await GenerateEmbeddingAsync(text, cancellationToken);
-            embeddings.Add(embedding);
-            await Task.Delay(100, cancellationToken);
+            return Array.Empty<float[]>();
         }
-        
-        _logger?.LogInformation("Successfully generated {Count} embeddings", embeddings.Count);
-        return embeddings.ToArray();
+
+        _logger?.LogInformation("Generating embeddings for {Count} texts (batch size: {BatchSize})",
+            textList.Count, _batchSize);
+
+        var allEmbeddings = new List<float[]>(textList.Count);
+
+        // Process in batches of _batchSize to keep request payloads reasonable.
+        for (int offset = 0; offset < textList.Count; offset += _batchSize)
+        {
+            var batch = textList.Skip(offset).Take(_batchSize).ToList();
+            float[][] batchEmbeddings;
+
+            try
+            {
+                batchEmbeddings = await SendBatchEmbeddingRequestAsync(batch, cancellationToken).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex) when (IsBatchEndpointUnavailable(ex))
+            {
+                // Older Ollama versions (pre-0.1.27) do not expose /api/embed.
+                // Fall back to single-text requests. No artificial delay — that
+                // was an anti-pattern that masked the missing batch API.
+                _logger?.LogWarning(
+                    "Ollama batch endpoint unavailable ({Message}). Falling back to sequential single-text requests.",
+                    ex.Message);
+                batchEmbeddings = await SendFallbackSequentialAsync(batch, cancellationToken).ConfigureAwait(false);
+            }
+
+            allEmbeddings.AddRange(batchEmbeddings);
+        }
+
+        _logger?.LogInformation("Successfully generated {Count} embeddings", allEmbeddings.Count);
+        return allEmbeddings.ToArray();
+    }
+
+    /// <summary>
+    /// Sends one batch request to Ollama's <c>/api/embed</c> endpoint. Returns
+    /// embeddings in the same order as the input texts.
+    /// </summary>
+    private async Task<float[][]> SendBatchEmbeddingRequestAsync(
+        IReadOnlyList<string> batch,
+        CancellationToken cancellationToken)
+    {
+        var request = new
+        {
+            model = _embeddingModel,
+            input = batch.Select(t => TruncateText(t, 8192)).ToArray()
+        };
+
+        var response = await _httpClient.PostAsJsonAsync("/api/embed", request, cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            // Surface 404 as the trigger for the fallback path.
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                throw new HttpRequestException(
+                    $"Ollama /api/embed returned 404: {errorBody}",
+                    inner: null,
+                    statusCode: System.Net.HttpStatusCode.NotFound);
+            }
+            throw new HttpRequestException($"Ollama API error: {response.StatusCode} - {errorBody}");
+        }
+
+        var result = await response.Content
+            .ReadFromJsonAsync<OllamaBatchEmbeddingResponse>(cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result?.Embeddings == null || result.Embeddings.Length != batch.Count)
+        {
+            throw new InvalidOperationException(
+                $"Ollama batch response shape mismatch: expected {batch.Count} embeddings, got {result?.Embeddings?.Length ?? 0}");
+        }
+
+        return result.Embeddings;
+    }
+
+    /// <summary>
+    /// Returns true when the exception indicates the /api/embed endpoint does
+    /// not exist on this Ollama server (older versions). Triggers the
+    /// fallback to single-text requests.
+    /// </summary>
+    private static bool IsBatchEndpointUnavailable(HttpRequestException ex)
+    {
+        return ex.StatusCode == System.Net.HttpStatusCode.NotFound
+            || (ex.InnerException is System.Net.Http.HttpRequestException inner
+                && inner.Message.Contains("404"));
+    }
+
+    /// <summary>
+    /// Last-resort fallback: process each text with the single-text endpoint.
+    /// Used only when /api/embed is not available. No artificial delays.
+    /// </summary>
+    private async Task<float[][]> SendFallbackSequentialAsync(
+        IReadOnlyList<string> batch,
+        CancellationToken cancellationToken)
+    {
+        var results = new float[batch.Count][];
+        for (int i = 0; i < batch.Count; i++)
+        {
+            results[i] = await GenerateEmbeddingAsync(batch[i], cancellationToken).ConfigureAwait(false);
+        }
+        return results;
     }
 
     /// <inheritdoc />
@@ -233,5 +335,19 @@ public class OllamaEmbeddingService : IEmbeddingService
     {
         [JsonPropertyName("embedding")]
         public float[]? Embedding { get; set; }
+    }
+
+    /// <summary>
+    /// Response shape for Ollama's <c>/api/embed</c> batch endpoint (added in
+    /// Ollama 0.1.27). <c>embeddings</c> is parallel to the request's
+    /// <c>input</c> array.
+    /// </summary>
+    private class OllamaBatchEmbeddingResponse
+    {
+        [JsonPropertyName("model")]
+        public string? Model { get; set; }
+
+        [JsonPropertyName("embeddings")]
+        public float[][]? Embeddings { get; set; }
     }
 }

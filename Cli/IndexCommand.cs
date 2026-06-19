@@ -83,18 +83,43 @@ public static class IndexCommand
             return 0;
         }
 
-        // Generate embeddings only for changed chunks
+        // Generate embeddings in a single batch call to leverage the
+        // /api/embed endpoint (10-30x faster than per-chunk requests).
         logger.LogInformation("Generating embeddings for {Count} changed chunks...", changedChunks.Count);
-        var processed = 0;
-        foreach (var chunk in changedChunks)
+
+        var contents = changedChunks.Select(c => c.Content).ToList();
+        float[][] embeddings;
+        try
         {
+            embeddings = await embeddingService.GenerateEmbeddingsAsync(contents);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Batch embedding generation failed");
+            return 1;
+        }
+
+        if (embeddings.Length != changedChunks.Count)
+        {
+            logger.LogError(
+                "Embedding count mismatch: expected {Expected}, got {Actual}",
+                changedChunks.Count, embeddings.Length);
+            return 1;
+        }
+
+        // Attach embeddings + persist chunks. No further HTTP calls per chunk.
+        var processed = 0;
+        for (int i = 0; i < changedChunks.Count; i++)
+        {
+            var chunk = changedChunks[i];
+            var embedding = embeddings[i];
+
             try
             {
-                var embedding = await embeddingService.GenerateEmbeddingAsync(chunk.Content);
-
                 if (embedding == null || embedding.Length == 0)
                 {
-                    logger.LogWarning("Empty embedding for {FilePath} - {MemberName}. Skipping.", chunk.FilePath, chunk.MemberName);
+                    logger.LogWarning("Empty embedding for {FilePath} - {MemberName}. Skipping.",
+                        chunk.FilePath, chunk.MemberName);
                     continue;
                 }
 
@@ -110,7 +135,8 @@ public static class IndexCommand
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Error processing {FilePath} - {MemberName}", chunk.FilePath, chunk.MemberName);
+                logger.LogError(ex, "Error processing {FilePath} - {MemberName}",
+                    chunk.FilePath, chunk.MemberName);
             }
         }
 

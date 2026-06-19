@@ -83,6 +83,10 @@ public class Issue3HybridSearchTests
         var embeddingService = new Mock<IEmbeddingService>();
         embeddingService.Setup(e => e.GenerateEmbeddingAsync(It.IsAny<string>()))
                         .ReturnsAsync(new float[] { 0.1f, 0.2f, 0.3f });
+        // After Issue #13: IndexCommand batches via GenerateEmbeddingsAsync.
+        embeddingService.Setup(e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+                        .ReturnsAsync((IEnumerable<string> texts, CancellationToken _) =>
+                            texts.Select(_ => new float[] { 0.1f, 0.2f, 0.3f }).ToArray());
 
         var database = new Mock<IVectorDatabase>();
         database.Setup(d => d.IsInitializedAsync()).ReturnsAsync(true);
@@ -127,6 +131,10 @@ public class Issue3HybridSearchTests
         var embeddingService = new Mock<IEmbeddingService>();
         embeddingService.Setup(e => e.GenerateEmbeddingAsync(It.IsAny<string>()))
                         .ReturnsAsync(new float[] { 0.1f, 0.2f, 0.3f });
+        // After Issue #13: IndexCommand batches via GenerateEmbeddingsAsync.
+        embeddingService.Setup(e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+                        .ReturnsAsync((IEnumerable<string> texts, CancellationToken _) =>
+                            texts.Select(_ => new float[] { 0.1f, 0.2f, 0.3f }).ToArray());
 
         var database = new Mock<IVectorDatabase>();
         database.Setup(d => d.IsInitializedAsync()).ReturnsAsync(true);
