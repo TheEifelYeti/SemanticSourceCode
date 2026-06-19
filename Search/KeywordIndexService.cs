@@ -67,9 +67,52 @@ public class KeywordIndexService : IKeywordIndex
 
     public async Task IndexChunksAsync(IEnumerable<CodeChunk> chunks)
     {
-        foreach (var chunk in chunks)
+        await _initializer.EnsureInitializedAsync().ConfigureAwait(false);
+
+        var chunkList = chunks as IReadOnlyCollection<CodeChunk> ?? chunks.ToList();
+        if (chunkList.Count == 0) return;
+
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
+        await using var tx = (SqliteTransaction)await connection.BeginTransactionAsync().ConfigureAwait(false);
+
+        try
         {
-            await IndexChunkAsync(chunk).ConfigureAwait(false);
+            // Reused prepared statements: 1 DELETE per chunk + 1 INSERT per term.
+            using var deleteCmd = new SqliteCommand("DELETE FROM KeywordIndex WHERE ChunkId = @chunkId", connection, tx);
+            var deleteParam = deleteCmd.Parameters.Add("@chunkId", SqliteType.Text);
+
+            using var insertCmd = new SqliteCommand(@"
+                INSERT INTO KeywordIndex (ChunkId, Term, Weight, IndexedAt)
+                VALUES (@ChunkId, @Term, @Weight, @IndexedAt)", connection, tx);
+            var insertChunkParam = insertCmd.Parameters.Add("@ChunkId", SqliteType.Text);
+            var insertTermParam = insertCmd.Parameters.Add("@Term", SqliteType.Text);
+            var insertWeightParam = insertCmd.Parameters.Add("@Weight", SqliteType.Real);
+            var insertIndexedAtParam = insertCmd.Parameters.Add("@IndexedAt", SqliteType.Text);
+
+            var indexedAtString = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+            foreach (var chunk in chunkList)
+            {
+                deleteParam.Value = chunk.Id;
+                await deleteCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+
+                var terms = ExtractTerms(chunk);
+                foreach (var (term, weight) in terms)
+                {
+                    insertChunkParam.Value = chunk.Id;
+                    insertTermParam.Value = term.ToLowerInvariant();
+                    insertWeightParam.Value = weight;
+                    insertIndexedAtParam.Value = indexedAtString;
+                    await insertCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+                }
+            }
+
+            await tx.CommitAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            await tx.RollbackAsync().ConfigureAwait(false);
+            throw;
         }
     }
 
