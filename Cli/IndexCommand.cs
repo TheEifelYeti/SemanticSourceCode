@@ -83,40 +83,72 @@ public static class IndexCommand
             return 0;
         }
 
-        // Generate embeddings only for changed chunks
+        // Generate embeddings in a single batch call to leverage the
+        // /api/embed endpoint (10-30x faster than per-chunk requests).
         logger.LogInformation("Generating embeddings for {Count} changed chunks...", changedChunks.Count);
-        var processed = 0;
-        foreach (var chunk in changedChunks)
+
+        var contents = changedChunks.Select(c => c.Content).ToList();
+        float[][] embeddings;
+        try
         {
-            try
+            embeddings = await embeddingService.GenerateEmbeddingsAsync(contents);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Batch embedding generation failed");
+            return 1;
+        }
+
+        if (embeddings.Length != changedChunks.Count)
+        {
+            logger.LogError(
+                "Embedding count mismatch: expected {Expected}, got {Actual}",
+                changedChunks.Count, embeddings.Length);
+            return 1;
+        }
+
+        // Attach embeddings + persist chunks in bulk.
+        // Issue #21: use the single-transaction bulk APIs to avoid N
+        // connections / implicit transactions with their own fsync per chunk.
+        // Collect chunks with non-empty embeddings first; empty ones get skipped
+        // (and logged) without polluting the batch.
+        var chunksToPersist = new List<CodeChunk>(changedChunks.Count);
+        for (int i = 0; i < changedChunks.Count; i++)
+        {
+            var chunk = changedChunks[i];
+            var embedding = embeddings[i];
+
+            if (embedding == null || embedding.Length == 0)
             {
-                var embedding = await embeddingService.GenerateEmbeddingAsync(chunk.Content);
-
-                if (embedding == null || embedding.Length == 0)
-                {
-                    logger.LogWarning("Empty embedding for {FilePath} - {MemberName}. Skipping.", chunk.FilePath, chunk.MemberName);
-                    continue;
-                }
-
-                chunk.Embedding = ConvertFloatArrayToByteArray(embedding);
-                await database.InsertChunkAsync(chunk);
-                await keywordIndex.IndexChunkAsync(chunk);
-
-                processed++;
-                if (processed % 10 == 0)
-                {
-                    logger.LogInformation("Processed {Processed}/{Total} chunks...", processed, changedChunks.Count);
-                }
+                logger.LogWarning("Empty embedding for {FilePath} - {MemberName}. Skipping.",
+                    chunk.FilePath, chunk.MemberName);
+                continue;
             }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error processing {FilePath} - {MemberName}", chunk.FilePath, chunk.MemberName);
-            }
+
+            chunk.Embedding = ConvertFloatArrayToByteArray(embedding);
+            chunksToPersist.Add(chunk);
+        }
+
+        var processed = 0;
+        var success = true;
+        try
+        {
+            await database.InsertChunksAsync(chunksToPersist).ConfigureAwait(false);
+            await keywordIndex.IndexChunksAsync(chunksToPersist).ConfigureAwait(false);
+            processed = chunksToPersist.Count;
+            logger.LogInformation("Processed {Processed}/{Total} chunks (single transaction)...",
+                processed, changedChunks.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error during bulk insert of {Count} chunks",
+                chunksToPersist.Count);
+            success = false;
         }
 
         logger.LogInformation("Successfully indexed {Processed} code chunks ({Skipped} unchanged).",
             processed, skippedCount);
-        return 0;
+        return success ? 0 : 1;
     }
 
     private static byte[] ConvertFloatArrayToByteArray(float[] floats)

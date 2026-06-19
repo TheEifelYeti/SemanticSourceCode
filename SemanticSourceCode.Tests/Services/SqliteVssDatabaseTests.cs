@@ -579,4 +579,82 @@ public class SqliteVssDatabaseTests : IDisposable
 
         return chunk;
     }
+
+    // ---------- Issue #21: bulk-insert transaction behaviour ----------
+
+    [Fact]
+    public async Task InsertChunksAsync_PersistsAllChunks()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+        var chunks = new[]
+        {
+            CreateTestChunk("Bulk1", new float[] { 1, 0, 0 }, id: "bulk-1"),
+            CreateTestChunk("Bulk2", new float[] { 0, 1, 0 }, id: "bulk-2"),
+            CreateTestChunk("Bulk3", new float[] { 0, 0, 1 }, id: "bulk-3"),
+        };
+
+        // Act
+        await _database.InsertChunksAsync(chunks);
+
+        // Assert — all 3 reachable via similarity search (the only public read API).
+        var results = await _database.SearchSimilarAsync(new float[] { 1, 0, 0 }, 10);
+        Assert.Contains(results, c => c.Id == "bulk-1");
+        Assert.Contains(results, c => c.Id == "bulk-2");
+        Assert.Contains(results, c => c.Id == "bulk-3");
+    }
+
+    [Fact]
+    public async Task InsertChunksAsync_EmptyList_NoOpNoThrow()
+    {
+        // Arrange
+        await _database.InitializeAsync();
+
+        // Act + Assert
+        await _database.InsertChunksAsync(Array.Empty<CodeChunk>());
+        // No exception, no rows.
+        var all = await _database.GetAllContentHashesAsync();
+        Assert.Empty(all);
+    }
+
+    [Fact]
+    public async Task InsertChunksAsync_ReplacesExistingChunksOnSemanticId()
+    {
+        // Arrange — pre-insert one chunk, then bulk-insert with same id but
+        // different content. The INSERT OR REPLACE should overwrite it.
+        await _database.InitializeAsync();
+        var original = CreateTestChunk("Original", id: "dup-1");
+        await _database.InsertChunksAsync(new[] { original });
+
+        var updated = CreateTestChunk("Updated", id: "dup-1");
+
+        // Act
+        await _database.InsertChunksAsync(new[] { updated });
+
+        // Assert — only the updated version remains (single row, new content).
+        var results = await _database.SearchSimilarAsync(new float[] { 1, 0, 0 }, 10);
+        var matches = results.Where(c => c.Id == "dup-1").ToList();
+        Assert.Single(matches);
+        Assert.Equal("Updated", matches[0].MemberName);
+    }
+
+    [Fact]
+    public async Task InsertChunksAsync_PersistsFiftyChunksInOneBatch()
+    {
+        // Arrange — smoke test for the happy-path bulk insert. We can't easily
+        // force a rollback from the outside without violating a constraint,
+        // but we can verify the bulk method accepts IEnumerable<CodeChunk>
+        // and persists every row.
+        await _database.InitializeAsync();
+        var chunks = Enumerable.Range(0, 50)
+            .Select(i => CreateTestChunk($"M{i}", new float[] { 1, 0, 0 }, id: $"bulk50-{i}"))
+            .ToArray();
+
+        // Act
+        await _database.InsertChunksAsync(chunks);
+
+        // Assert — all 50 chunks are findable.
+        var results = await _database.SearchSimilarAsync(new float[] { 1, 0, 0 }, 100);
+        Assert.Equal(50, results.Count(r => r.Id.StartsWith("bulk50-")));
+    }
 }

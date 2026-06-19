@@ -23,7 +23,17 @@ public class SqliteConnectionFactoryTests : IDisposable
 
     public void Dispose()
     {
-        try { Directory.Delete(_tempDir, recursive: true); } catch { /* best effort */ }
+        try
+        {
+            // WAL mode creates .db-wal and .db-shm sidecars; remove them too.
+            foreach (var suffix in new[] { "", "-wal", "-shm" })
+            {
+                var path = _testDbPath + suffix;
+                if (File.Exists(path)) File.Delete(path);
+            }
+            Directory.Delete(_tempDir, recursive: true);
+        }
+        catch { /* best effort */ }
     }
 
     private IConfiguration BuildConfig(string? dbPath = null)
@@ -125,5 +135,83 @@ public class SqliteConnectionFactoryTests : IDisposable
         await using var cmd = new SqliteCommand(
             "SELECT name FROM sqlite_master WHERE type='table';", await factory.OpenAsync());
         await cmd.ExecuteScalarAsync();
+    }
+
+    // --- Issue #21: PRAGMA application ---
+
+    [Fact]
+    public async Task OpenAsync_AppliesWalJournalMode()
+    {
+        // Arrange
+        var factory = new SqliteConnectionFactory(BuildConfig(_testDbPath));
+        await using var conn = await factory.OpenAsync();
+
+        // Act
+        await using var cmd = new SqliteCommand("PRAGMA journal_mode;", conn);
+        var mode = (string?)await cmd.ExecuteScalarAsync();
+
+        // Assert
+        Assert.Equal("wal", mode);
+    }
+
+    [Fact]
+    public async Task OpenAsync_AppliesNormalSynchronous()
+    {
+        // Arrange
+        var factory = new SqliteConnectionFactory(BuildConfig(_testDbPath));
+        await using var conn = await factory.OpenAsync();
+
+        // Act — synchronous returns the numeric code: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA
+        await using var cmd = new SqliteCommand("PRAGMA synchronous;", conn);
+        var level = (long)(await cmd.ExecuteScalarAsync())!;
+
+        // Assert
+        Assert.Equal(1L, level);
+    }
+
+    [Fact]
+    public async Task OpenAsync_AppliesMemoryTempStore()
+    {
+        // Arrange
+        var factory = new SqliteConnectionFactory(BuildConfig(_testDbPath));
+        await using var conn = await factory.OpenAsync();
+
+        // Act — temp_store: 0=DEFAULT, 1=FILE, 2=MEMORY
+        await using var cmd = new SqliteCommand("PRAGMA temp_store;", conn);
+        var store = (long)(await cmd.ExecuteScalarAsync())!;
+
+        // Assert
+        Assert.Equal(2L, store);
+    }
+
+    [Fact]
+    public async Task OpenAsync_AppliesNegativeCacheSize()
+    {
+        // Arrange
+        var factory = new SqliteConnectionFactory(BuildConfig(_testDbPath));
+        await using var conn = await factory.OpenAsync();
+
+        // Act — negative values mean KiB of memory.
+        await using var cmd = new SqliteCommand("PRAGMA cache_size;", conn);
+        var cache = (long)(await cmd.ExecuteScalarAsync())!;
+
+        // Assert
+        Assert.Equal(-64000L, cache);
+    }
+
+    [Fact]
+    public async Task OpenAsync_PragmasPersistAcrossConnections()
+    {
+        // Arrange — open once, close, then re-open and verify WAL is still set.
+        var factory = new SqliteConnectionFactory(BuildConfig(_testDbPath));
+        await using (var _ = await factory.OpenAsync()) { /* close */ }
+
+        // Act
+        await using var conn = await factory.OpenAsync();
+        await using var cmd = new SqliteCommand("PRAGMA journal_mode;", conn);
+        var mode = (string?)await cmd.ExecuteScalarAsync();
+
+        // Assert — WAL is sticky in the DB file.
+        Assert.Equal("wal", mode);
     }
 }

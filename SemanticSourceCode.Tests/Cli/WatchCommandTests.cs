@@ -44,6 +44,11 @@ public class WatchCommandTests : IDisposable
         _embedding
             .Setup(e => e.GenerateEmbeddingAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new float[] { 1.0f, 1.0f, 1.0f, 1.0f });
+        // After Issue #13: ProcessChunksAsync batches via GenerateEmbeddingsAsync.
+        _embedding
+            .Setup(e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IEnumerable<string> texts, CancellationToken _) =>
+                texts.Select(_ => new float[] { 1.0f, 1.0f, 1.0f, 1.0f }).ToArray());
 
         _keywordIndex = new Mock<IKeywordIndex>();
         _keywordIndex
@@ -131,8 +136,9 @@ public class WatchCommandTests : IDisposable
             chunks, existing, _embedding.Object, _db, _keywordIndex.Object, logger);
 
         Assert.Equal(0, result);
+        // After Issue #13: ProcessChunksAsync batches via GenerateEmbeddingsAsync.
         _embedding.Verify(
-            e => e.GenerateEmbeddingAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()),
             Times.Once);
     }
 

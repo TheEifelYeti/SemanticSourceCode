@@ -83,6 +83,10 @@ public class Issue3HybridSearchTests
         var embeddingService = new Mock<IEmbeddingService>();
         embeddingService.Setup(e => e.GenerateEmbeddingAsync(It.IsAny<string>()))
                         .ReturnsAsync(new float[] { 0.1f, 0.2f, 0.3f });
+        // After Issue #13: IndexCommand batches via GenerateEmbeddingsAsync.
+        embeddingService.Setup(e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+                        .ReturnsAsync((IEnumerable<string> texts, CancellationToken _) =>
+                            texts.Select(_ => new float[] { 0.1f, 0.2f, 0.3f }).ToArray());
 
         var database = new Mock<IVectorDatabase>();
         database.Setup(d => d.IsInitializedAsync()).ReturnsAsync(true);
@@ -104,8 +108,8 @@ public class Issue3HybridSearchTests
             var exitCode = await IndexCommand.RunAsync(sp, tempDir, logger);
 
             // Assert
-            Assert.Equal(0, exitCode);
-            keywordIndex.Verify(k => k.IndexChunkAsync(It.IsAny<CodeChunk>()), Times.Exactly(3));
+            // Issue #21: IndexCommand now uses the bulk API once for the whole batch.
+            keywordIndex.Verify(k => k.IndexChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()), Times.Once);
         }
         finally
         {
@@ -127,6 +131,10 @@ public class Issue3HybridSearchTests
         var embeddingService = new Mock<IEmbeddingService>();
         embeddingService.Setup(e => e.GenerateEmbeddingAsync(It.IsAny<string>()))
                         .ReturnsAsync(new float[] { 0.1f, 0.2f, 0.3f });
+        // After Issue #13: IndexCommand batches via GenerateEmbeddingsAsync.
+        embeddingService.Setup(e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+                        .ReturnsAsync((IEnumerable<string> texts, CancellationToken _) =>
+                            texts.Select(_ => new float[] { 0.1f, 0.2f, 0.3f }).ToArray());
 
         var database = new Mock<IVectorDatabase>();
         database.Setup(d => d.IsInitializedAsync()).ReturnsAsync(true);
@@ -134,11 +142,19 @@ public class Issue3HybridSearchTests
         database.Setup(d => d.InsertChunkAsync(It.IsAny<CodeChunk>()))
                 .Callback<CodeChunk>(_ => callOrder.Add("database"))
                 .Returns(Task.CompletedTask);
+        // Issue #21: the IndexCommand now uses InsertChunksAsync for the whole batch.
+        database.Setup(d => d.InsertChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()))
+                .Callback<IEnumerable<CodeChunk>>(_ => callOrder.Add("database"))
+                .Returns(Task.CompletedTask);
 
         var keywordIndex = new Mock<IKeywordIndex>();
         keywordIndex.Setup(k => k.IsAvailableAsync()).ReturnsAsync(true);
         keywordIndex.Setup(k => k.IndexChunkAsync(It.IsAny<CodeChunk>()))
                     .Callback<CodeChunk>(_ => callOrder.Add("keywordIndex"))
+                    .Returns(Task.CompletedTask);
+        // Issue #21: bulk IndexChunksAsync is what the IndexCommand actually calls.
+        keywordIndex.Setup(k => k.IndexChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()))
+                    .Callback<IEnumerable<CodeChunk>>(_ => callOrder.Add("keywordIndex"))
                     .Returns(Task.CompletedTask);
 
         var tempDir = Path.Combine(Path.GetTempPath(), $"idx_{Guid.NewGuid()}");
@@ -186,7 +202,55 @@ public class Issue3HybridSearchTests
 
             await IndexCommand.RunAsync(sp, tempDir, logger);
 
-            keywordIndex.Verify(k => k.IndexChunkAsync(It.IsAny<CodeChunk>()), Times.Never);
+            // Issue #21: bulk API replaces per-chunk IndexChunkAsync.
+            keywordIndex.Verify(k => k.IndexChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task IndexCommand_BulkInsertThrows_ReturnsExitCodeOne()
+    {
+        // Regression test for the BLOCKER found in Issue #21 code review:
+        // previously the catch block in ProcessChunksAsync logged the error but
+        // still returned 0, masking bulk-insert failures from the CLI caller.
+
+        // Arrange
+        var chunks = new List<CodeChunk> { CreateTestChunk("boom-1") };
+        var analyzer = new Mock<ICodeAnalyzer>();
+        analyzer.Setup(a => a.AnalyzeDirectoryAsync(It.IsAny<string>(), It.IsAny<string>()))
+                .ReturnsAsync(chunks);
+
+        var embeddingService = new Mock<IEmbeddingService>();
+        embeddingService.Setup(e => e.GenerateEmbeddingsAsync(It.IsAny<IEnumerable<string>>(), It.IsAny<CancellationToken>()))
+                        .ReturnsAsync((IEnumerable<string> texts, CancellationToken _) =>
+                            texts.Select(_ => new float[] { 0.1f, 0.2f, 0.3f }).ToArray());
+
+        var database = new Mock<IVectorDatabase>();
+        database.Setup(d => d.IsInitializedAsync()).ReturnsAsync(true);
+        database.Setup(d => d.GetAllContentHashesAsync()).ReturnsAsync(new Dictionary<string, string>());
+        database.Setup(d => d.InsertChunksAsync(It.IsAny<IEnumerable<CodeChunk>>()))
+                .ThrowsAsync(new InvalidOperationException("simulated bulk-insert failure"));
+
+        var keywordIndex = new Mock<IKeywordIndex>();
+        keywordIndex.Setup(k => k.IsAvailableAsync()).ReturnsAsync(true);
+
+        var tempDir = Path.Combine(Path.GetTempPath(), $"idx_{Guid.NewGuid()}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var sp = BuildServiceProvider(analyzer.Object, embeddingService.Object,
+                database.Object, keywordIndex.Object);
+            var logger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("Test");
+
+            // Act
+            var exitCode = await IndexCommand.RunAsync(sp, tempDir, logger);
+
+            // Assert — caller must see the failure.
+            Assert.Equal(1, exitCode);
         }
         finally
         {

@@ -92,48 +92,14 @@ public class SqliteVssDatabase : IVectorDatabase
         }
     }
 
-    public async Task InsertChunkAsync(CodeChunk chunk)
+    public Task InsertChunkAsync(CodeChunk chunk)
     {
-        await EnsureInitializedAsync().ConfigureAwait(false);
-
-        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
-
-        var insertCmd = @"
-            INSERT OR REPLACE INTO CodeChunks 
-            (Id, FilePath, NamespaceName, ClassName, MemberName, MemberType, Content, Signature, Documentation, StartLine, EndLine, Embedding, IndexedAt, ContentHash, IsController, IsService, IsMiddleware, HttpMethods, RouteTemplate)
-            VALUES (@Id, @FilePath, @NamespaceName, @ClassName, @MemberName, @MemberType, @Content, @Signature, @Documentation, @StartLine, @EndLine, @Embedding, @IndexedAt, @ContentHash, @IsController, @IsService, @IsMiddleware, @HttpMethods, @RouteTemplate)";
-
-        using var command = new SqliteCommand(insertCmd, connection);
-        command.Parameters.AddWithValue("@Id", chunk.Id);
-        command.Parameters.AddWithValue("@FilePath", chunk.FilePath);
-        command.Parameters.AddWithValue("@NamespaceName", chunk.NamespaceName);
-        command.Parameters.AddWithValue("@ClassName", chunk.ClassName);
-        command.Parameters.AddWithValue("@MemberName", chunk.MemberName);
-        command.Parameters.AddWithValue("@MemberType", chunk.MemberType);
-        command.Parameters.AddWithValue("@Content", chunk.Content);
-        command.Parameters.AddWithValue("@Signature", chunk.Signature);
-        command.Parameters.AddWithValue("@Documentation", chunk.Documentation);
-        command.Parameters.AddWithValue("@StartLine", chunk.StartLine);
-        command.Parameters.AddWithValue("@EndLine", chunk.EndLine);
-        command.Parameters.AddWithValue("@Embedding", chunk.Embedding ?? Array.Empty<byte>());
-        command.Parameters.AddWithValue("@IndexedAt", chunk.IndexedAt.ToString("O"));
-        command.Parameters.AddWithValue("@ContentHash", chunk.ContentHash ?? string.Empty);
-        command.Parameters.AddWithValue("@IsController", chunk.IsController ? 1 : 0);
-        command.Parameters.AddWithValue("@IsService", chunk.IsService ? 1 : 0);
-        command.Parameters.AddWithValue("@IsMiddleware", chunk.IsMiddleware ? 1 : 0);
-        command.Parameters.AddWithValue("@HttpMethods", chunk.HttpMethods ?? (object)DBNull.Value);
-        command.Parameters.AddWithValue("@RouteTemplate", chunk.RouteTemplate ?? (object)DBNull.Value);
-
-        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-
-        // Also insert into vec0 virtual table for ANN search
-        if (_vecLoaded && chunk.Embedding != null && chunk.Embedding.Length > 0)
-        {
-            await InsertVecEmbeddingAsync(connection, chunk).ConfigureAwait(false);
-        }
+        // Single-chunk convenience wrapper. The bulk path is implemented in
+        // InsertChunksAsync and runs everything in a single transaction.
+        return InsertChunksAsync(new[] { chunk });
     }
 
-    private async Task InsertVecEmbeddingAsync(SqliteConnection connection, CodeChunk chunk)
+    private async Task InsertVecEmbeddingAsync(SqliteConnection connection, SqliteTransaction tx, CodeChunk chunk)
     {
         try
         {
@@ -153,11 +119,11 @@ public class SqliteVssDatabase : IVectorDatabase
             var embeddingJson = "[" + string.Join(",", embeddingFloats.Select(f => f.ToString("G9", CultureInfo.InvariantCulture))) + "]";
 
             var insertVecCmd = @"
-                INSERT INTO vec_embeddings (embedding, chunk_id) 
+                INSERT INTO vec_embeddings (embedding, chunk_id)
                 VALUES (json(?), ?)
                 ON CONFLICT(chunk_id) DO UPDATE SET embedding = json(?);";
 
-            using var command = new SqliteCommand(insertVecCmd, connection);
+            using var command = new SqliteCommand(insertVecCmd, connection, tx);
             command.Parameters.AddWithValue("@embedding", embeddingJson);
             command.Parameters.AddWithValue("@chunk_id", chunk.Id);
             command.Parameters.AddWithValue("@embedding_update", embeddingJson);
@@ -202,9 +168,79 @@ public class SqliteVssDatabase : IVectorDatabase
 
     public async Task InsertChunksAsync(IEnumerable<CodeChunk> chunks)
     {
-        foreach (var chunk in chunks)
+        await EnsureInitializedAsync().ConfigureAwait(false);
+
+        var chunkList = chunks as IReadOnlyCollection<CodeChunk> ?? chunks.ToList();
+        if (chunkList.Count == 0) return;
+
+        await using var connection = await _factory.OpenAsync().ConfigureAwait(false);
+        await using var tx = (SqliteTransaction)await connection.BeginTransactionAsync().ConfigureAwait(false);
+
+        try
         {
-            await InsertChunkAsync(chunk).ConfigureAwait(false);
+            // Reused prepared statement for the CodeChunks INSERT.
+            var chunkInsertCmd = @"
+                INSERT OR REPLACE INTO CodeChunks
+                (Id, FilePath, NamespaceName, ClassName, MemberName, MemberType, Content, Signature, Documentation, StartLine, EndLine, Embedding, IndexedAt, ContentHash, IsController, IsService, IsMiddleware, HttpMethods, RouteTemplate)
+                VALUES (@Id, @FilePath, @NamespaceName, @ClassName, @MemberName, @MemberType, @Content, @Signature, @Documentation, @StartLine, @EndLine, @Embedding, @IndexedAt, @ContentHash, @IsController, @IsService, @IsMiddleware, @HttpMethods, @RouteTemplate)";
+
+            using var chunkCmd = new SqliteCommand(chunkInsertCmd, connection, tx);
+            var pId = chunkCmd.Parameters.Add("@Id", SqliteType.Text);
+            var pFilePath = chunkCmd.Parameters.Add("@FilePath", SqliteType.Text);
+            var pNamespaceName = chunkCmd.Parameters.Add("@NamespaceName", SqliteType.Text);
+            var pClassName = chunkCmd.Parameters.Add("@ClassName", SqliteType.Text);
+            var pMemberName = chunkCmd.Parameters.Add("@MemberName", SqliteType.Text);
+            var pMemberType = chunkCmd.Parameters.Add("@MemberType", SqliteType.Text);
+            var pContent = chunkCmd.Parameters.Add("@Content", SqliteType.Text);
+            var pSignature = chunkCmd.Parameters.Add("@Signature", SqliteType.Text);
+            var pDocumentation = chunkCmd.Parameters.Add("@Documentation", SqliteType.Text);
+            var pStartLine = chunkCmd.Parameters.Add("@StartLine", SqliteType.Integer);
+            var pEndLine = chunkCmd.Parameters.Add("@EndLine", SqliteType.Integer);
+            var pEmbedding = chunkCmd.Parameters.Add("@Embedding", SqliteType.Blob);
+            var pIndexedAt = chunkCmd.Parameters.Add("@IndexedAt", SqliteType.Text);
+            var pContentHash = chunkCmd.Parameters.Add("@ContentHash", SqliteType.Text);
+            var pIsController = chunkCmd.Parameters.Add("@IsController", SqliteType.Integer);
+            var pIsService = chunkCmd.Parameters.Add("@IsService", SqliteType.Integer);
+            var pIsMiddleware = chunkCmd.Parameters.Add("@IsMiddleware", SqliteType.Integer);
+            var pHttpMethods = chunkCmd.Parameters.Add("@HttpMethods", SqliteType.Text);
+            var pRouteTemplate = chunkCmd.Parameters.Add("@RouteTemplate", SqliteType.Text);
+
+            foreach (var chunk in chunkList)
+            {
+                pId.Value = chunk.Id;
+                pFilePath.Value = chunk.FilePath;
+                pNamespaceName.Value = chunk.NamespaceName;
+                pClassName.Value = chunk.ClassName;
+                pMemberName.Value = chunk.MemberName;
+                pMemberType.Value = chunk.MemberType;
+                pContent.Value = chunk.Content;
+                pSignature.Value = chunk.Signature;
+                pDocumentation.Value = chunk.Documentation;
+                pStartLine.Value = chunk.StartLine;
+                pEndLine.Value = chunk.EndLine;
+                pEmbedding.Value = chunk.Embedding ?? Array.Empty<byte>();
+                pIndexedAt.Value = chunk.IndexedAt.ToString("O", CultureInfo.InvariantCulture);
+                pContentHash.Value = chunk.ContentHash ?? string.Empty;
+                pIsController.Value = chunk.IsController ? 1 : 0;
+                pIsService.Value = chunk.IsService ? 1 : 0;
+                pIsMiddleware.Value = chunk.IsMiddleware ? 1 : 0;
+                pHttpMethods.Value = (object?)chunk.HttpMethods ?? DBNull.Value;
+                pRouteTemplate.Value = (object?)chunk.RouteTemplate ?? DBNull.Value;
+
+                await chunkCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+
+                if (_vecLoaded && chunk.Embedding != null && chunk.Embedding.Length > 0)
+                {
+                    await InsertVecEmbeddingAsync(connection, tx, chunk).ConfigureAwait(false);
+                }
+            }
+
+            await tx.CommitAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            await tx.RollbackAsync().ConfigureAwait(false);
+            throw;
         }
     }
 

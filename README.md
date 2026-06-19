@@ -4,7 +4,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
-![Tests](https://img.shields.io/badge/Tests-224%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-235%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
 ## Highlights
@@ -20,6 +20,7 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 - 🚀 **Enhanced Search Quality** — Content boosting and query expansion for better results
 - 🏷️ **Framework Detection** — Automatic detection of ASP.NET Controllers, Services and Middleware
 - 📊 **Call Graph Analysis** — Track method calls and dependencies between code chunks
+- 🚀 **Bulk Indexing** — Single-transaction WAL writes + batched embedding calls for fast re-indexing
 
 ## Search Features
 
@@ -273,6 +274,11 @@ dotnet publish -c Release
 # Example with absolute path
 ./SemanticSourceCode --mode index --path /home/user/projects/MyApp
 ```
+
+**Performance:** Indexing batches embedding requests and writes to the SQLite
+database inside a single transaction with WAL mode enabled. The DB write step
+that used to dominate indexing time now takes ~0.3 seconds for ~140 chunks on a
+Raspberry Pi 5. See `scripts/benchmark-index.sh` to reproduce.
 
 ### 2. Watch (live incremental indexing)
 

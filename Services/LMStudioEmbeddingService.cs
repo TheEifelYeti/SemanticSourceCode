@@ -14,6 +14,7 @@ public class LMStudioEmbeddingService : IEmbeddingService
 {
     private readonly HttpClient _httpClient;
     private string _embeddingModel;
+    private readonly int _batchSize;
     private readonly ILogger<LMStudioEmbeddingService>? _logger;
 
     /// <summary>
@@ -41,10 +42,15 @@ public class LMStudioEmbeddingService : IEmbeddingService
         _httpClient.BaseAddress = new Uri(baseUrl);
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
 
+        // Batch size for /v1/embeddings batched requests. Default 32.
+        var batchSizeStr = configuration["Embedding:BatchSize"];
+        _batchSize = int.TryParse(batchSizeStr, out var parsed) && parsed > 0 ? parsed : 32;
+
         // Verify LM Studio is running and has a model loaded
         VerifyModelLoadedAsync().GetAwaiter().GetResult();
 
-        _logger?.LogInformation("LM Studio embedding service initialized with model: {Model}", _embeddingModel);
+        _logger?.LogInformation("LM Studio embedding service initialized with model: {Model} (batch size: {BatchSize})",
+            _embeddingModel, _batchSize);
     }
 
     /// <summary>
@@ -215,19 +221,83 @@ public class LMStudioEmbeddingService : IEmbeddingService
     /// <inheritdoc />
     public async Task<float[][]> GenerateEmbeddingsAsync(IEnumerable<string> texts, CancellationToken cancellationToken = default)
     {
-        var textList = texts.ToList();
-        _logger?.LogInformation("Generating embeddings for {Count} texts", textList.Count);
-        
-        var embeddings = new List<float[]>();
-        
-        foreach (var text in textList)
+        var textList = texts.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+        if (textList.Count == 0)
         {
-            var embedding = await GenerateEmbeddingAsync(text, cancellationToken);
-            embeddings.Add(embedding);
+            return Array.Empty<float[]>();
         }
-        
-        _logger?.LogInformation("Successfully generated {Count} embeddings", embeddings.Count);
-        return embeddings.ToArray();
+
+        _logger?.LogInformation("Generating embeddings for {Count} texts (batch size: {BatchSize})",
+            textList.Count, _batchSize);
+
+        var allEmbeddings = new List<float[]>(textList.Count);
+
+        for (int offset = 0; offset < textList.Count; offset += _batchSize)
+        {
+            var batch = textList.Skip(offset).Take(_batchSize).ToList();
+
+            try
+            {
+                var batchEmbeddings = await SendBatchEmbeddingRequestAsync(batch, cancellationToken).ConfigureAwait(false);
+                allEmbeddings.AddRange(batchEmbeddings);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.LogWarning(
+                    "LM Studio batch embedding failed ({Message}). Falling back to sequential single-text requests.",
+                    ex.Message);
+                var fallback = new List<float[]>(batch.Count);
+                foreach (var text in batch)
+                {
+                    fallback.Add(await GenerateEmbeddingAsync(text, cancellationToken).ConfigureAwait(false));
+                }
+                allEmbeddings.AddRange(fallback);
+            }
+        }
+
+        _logger?.LogInformation("Successfully generated {Count} embeddings", allEmbeddings.Count);
+        return allEmbeddings.ToArray();
+    }
+
+    /// <summary>
+    /// Sends one batched request to LM Studio's <c>/v1/embeddings</c> endpoint
+    /// with <c>input</c> as a string array. Returns embeddings sorted by
+    /// their <c>index</c> field (matching the input order).
+    /// </summary>
+    private async Task<float[][]> SendBatchEmbeddingRequestAsync(
+        IReadOnlyList<string> batch,
+        CancellationToken cancellationToken)
+    {
+        var request = new
+        {
+            model = _embeddingModel,
+            input = batch.ToArray()
+        };
+
+        var response = await _httpClient.PostAsJsonAsync("/v1/embeddings", request, cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            throw new HttpRequestException($"LM Studio API error: {response.StatusCode} - {errorBody}");
+        }
+
+        var result = await response.Content
+            .ReadFromJsonAsync<EmbeddingResponse>(cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result?.Data == null || result.Data.Count != batch.Count)
+        {
+            throw new InvalidOperationException(
+                $"LM Studio batch response shape mismatch: expected {batch.Count} items, got {result?.Data?.Count ?? 0}");
+        }
+
+        // LM Studio returns items ordered by their `index` field. Re-sort to
+        // match input order, matching the contract of IEmbeddingService.
+        return result.Data
+            .OrderBy(d => d.Index)
+            .Select(d => d.Embedding ?? Array.Empty<float>())
+            .ToArray();
     }
 
     /// <inheritdoc />
