@@ -7,6 +7,25 @@ A C# tool for semantic code search with local embeddings. Search your codebase b
 ![Tests](https://img.shields.io/badge/Tests-235%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
+## Why local-first?
+
+**Your code never leaves your machine.** Embeddings, vector search, and the index all run locally. No telemetry, no API calls, no third-party LLMs. Everything stays on your hardware.
+
+Most AI-powered code search tools send your source code to a cloud server for processing. SemanticSourceCode takes a different approach: the embedding model runs on your own machine via [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai), the vectors are stored in a local SQLite database, and search queries never touch the internet.
+
+### Comparison
+
+| Tool | Code stays local | Local embeddings | Open source |
+|------|:---:|:---:|:---:|
+| **SemanticSourceCode** | ✅ | ✅ | ✅ |
+| GitHub Copilot Workspace | ❌ | ❌ | ❌ |
+| Sourcegraph Cody | ⚠️ (cloud LLMs) | ❌ | ⚠️ (code is) |
+| Cursor | ❌ | ❌ | ❌ |
+
+### When NOT to use this
+
+If you need a hosted solution, a GUI, or multi-language support beyond C#, tools like [Cursor](https://cursor.com) or [Sourcegraph Cody](https://sourcegraph.com/cody) may be a better fit. SemanticSourceCode is built for the terminal and for AI agents that you run yourself.
+
 ## Highlights
 
 - 🔍 **Semantic Chunking** — Analyzes C# classes, methods, properties, constructors and fields separately
