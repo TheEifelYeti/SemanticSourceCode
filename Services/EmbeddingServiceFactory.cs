@@ -41,8 +41,9 @@ public class EmbeddingServiceFactory
         {
             "ollama" => CreateOllamaService(),
             "lmstudio" => CreateLMStudioService(),
+            "openai-compatible" or "openaicompatible" => CreateOpenAICompatibleService(),
             _ => throw new InvalidOperationException($"Unsupported embedding provider: {provider}. " +
-                "Supported providers: ollama, lmstudio")
+                "Supported providers: ollama, lmstudio, openai-compatible")
         };
     }
 
@@ -64,7 +65,27 @@ public class EmbeddingServiceFactory
         {
             _logger.LogInformation("Checking provider: {Candidate}...", candidate);
 
-            if (candidate == "lmstudio")
+            if (candidate == "openai-compatible")
+            {
+                var (isRunning, hasModel, selectedModel, errorMessage) =
+                    await OpenAICompatibleEmbeddingService.IsAvailableAsync(_configuration);
+
+                if (isRunning && hasModel)
+                {
+                    _logger.LogInformation("OpenAI-compatible endpoint is available with model: {Model}", selectedModel);
+                    return CreateOpenAICompatibleService();
+                }
+
+                if (isRunning && !hasModel)
+                {
+                    _logger.LogWarning("OpenAI-compatible endpoint erreichbar, aber kein Modell geladen. {Message}", errorMessage);
+                }
+                else
+                {
+                    _logger.LogWarning("OpenAI-compatible endpoint nicht verfügbar: {Message}", errorMessage);
+                }
+            }
+            else if (candidate == "lmstudio")
             {
                 var (isRunning, hasModel, selectedModel, errorMessage) =
                     await LMStudioEmbeddingService.IsAvailableAsync(_configuration);
@@ -119,6 +140,9 @@ public class EmbeddingServiceFactory
             "   • Install: https://ollama.com/\n" +
             "   • Run: ollama pull nomic-embed-text\n" +
             "   • Ensure Ollama is running: ollama serve\n\n" +
+            "3) Any OpenAI-compatible server (llama.cpp `llama-server`, vLLM, remote endpoint):\n" +
+            "   • Set 'Embedding:Provider' to 'openai-compatible'\n" +
+            "   • Set 'OpenAICompatible:BaseUrl' (e.g. http://localhost:8080/v1) and optionally 'OpenAICompatible:EmbeddingModel'\n\n" +
             $"Current config: Embedding:Provider = '{configuredProvider}'\n" +
             "Set to 'auto' (default) to let the app pick whichever is available.";
 
@@ -130,6 +154,7 @@ public class EmbeddingServiceFactory
     /// Resolves the provider trial order based on the configured provider.
     /// "auto" and "lmstudio" try LM Studio first (faster/local), then Ollama.
     /// "ollama" tries Ollama first, then LM Studio.
+    /// "openai-compatible" is only tried when explicitly configured.
     /// </summary>
     private static List<string> ResolveProviderOrder(string provider)
     {
@@ -138,8 +163,19 @@ public class EmbeddingServiceFactory
             "auto" => new List<string> { "lmstudio", "ollama" },
             "lmstudio" => new List<string> { "lmstudio", "ollama" },
             "ollama" => new List<string> { "ollama", "lmstudio" },
+            "openai-compatible" or "openaicompatible" => new List<string> { "openai-compatible" },
             _ => new List<string> { "lmstudio", "ollama" } // fallback for unknown values
         };
+    }
+
+    /// <summary>
+    /// Creates an OpenAI-compatible embedding service (llama.cpp, vLLM, etc.).
+    /// </summary>
+    /// <returns>An OpenAICompatibleEmbeddingService instance.</returns>
+    private IEmbeddingService CreateOpenAICompatibleService()
+    {
+        var logger = _loggerFactory.CreateLogger<OpenAICompatibleEmbeddingService>();
+        return new OpenAICompatibleEmbeddingService(_configuration, logger);
     }
 
     /// <summary>
