@@ -183,6 +183,7 @@ For the OpenAI-compatible provider, configure the endpoint in `appsettings.json`
 - `BaseUrl` may include the `/v1` suffix or not — both work.
 - `EmbeddingModel` is optional; when empty, the first model reported by `/v1/models` is used.
 - `ApiKey` is sent as a `Bearer` token when set (required for remote endpoints, ignored by local llama.cpp).
+- **Security note:** `ApiKey` in `appsettings.json` is stored in plaintext. For remote endpoints prefer an environment variable (`OpenAICompatible__ApiKey`) or [`dotnet user-secrets`](https://learn.microsoft.com/dotnet/core/tools/dotnet-user-secrets) so a real key never ends up in source control.
 
 **Note:** the `auto` provider (default) only auto-detects LM Studio and Ollama. The OpenAI-compatible provider is only used when explicitly configured — pointing it at a remote endpoint is a deliberate choice, since embeddings leave your machine.
 

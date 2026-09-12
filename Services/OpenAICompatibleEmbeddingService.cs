@@ -84,6 +84,9 @@ public class OpenAICompatibleEmbeddingService : IEmbeddingService
             baseUrl = baseUrl[..^1];
 
         var client = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        // Note: like the sibling services (Ollama/LMStudio), this sets the
+        // BaseAddress on the provided client — callers must not share the
+        // HttpClient across endpoints (tests rely on this behavior).
         client.BaseAddress = new Uri(baseUrl);
 
         try

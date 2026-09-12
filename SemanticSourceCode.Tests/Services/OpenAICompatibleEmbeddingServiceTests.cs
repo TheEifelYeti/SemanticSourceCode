@@ -188,7 +188,7 @@ public class OpenAICompatibleEmbeddingServiceTests
     }
 
     [Fact]
-    public void Constructor_Throws_WhenEndpointUnreachable()
+    public void Constructor_Throws_WhenEndpointReturnsErrorStatus()
     {
         var config = CreateConfig();
         var client = CreateMockHttpClient((req, _) =>
@@ -260,7 +260,35 @@ public class OpenAICompatibleEmbeddingServiceTests
     }
 
     [Fact]
-    public async Task GenerateEmbeddingsAsync_FallsBackToSingleRequests_WhenBatchFails()
+    public async Task GenerateEmbeddingsAsync_FallsBackToSingleRequests_WhenBatchHttpFails()
+    {
+        var config = CreateConfig(batchSize: "2");
+        var client = CreateMockHttpClient(async (req, ct) =>
+        {
+            if (req.RequestUri?.PathAndQuery == "/v1/models")
+                return Json(HttpStatusCode.OK, "{\"data\":[{\"id\":\"nomic-embed-text\"}]}");
+            if (req.RequestUri?.PathAndQuery == "/v1/embeddings")
+            {
+                // Batch requests carry an array input, single requests a string.
+                var body = await req.Content!.ReadAsStringAsync(ct);
+                if (body.TrimStart().StartsWith("{") && body.Contains("\"input\":["))
+                    return Json(HttpStatusCode.InternalServerError, "batch not supported");
+                return Json(HttpStatusCode.OK, "{\"data\":[{\"embedding\":[1],\"index\":0}]}");
+            }
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+
+        var service = new OpenAICompatibleEmbeddingService(config, null, client);
+
+        var embeddings = await service.GenerateEmbeddingsAsync(new[] { "a", "b" });
+
+        Assert.Equal(2, embeddings.Length);
+        Assert.Equal(new float[] { 1f }, embeddings[0]);
+        Assert.Equal(new float[] { 1f }, embeddings[1]);
+    }
+
+    [Fact]
+    public async Task GenerateEmbeddingsAsync_FallsBackToSingleRequests_WhenBatchResponseShapeMismatches()
     {
         var config = CreateConfig(batchSize: "2");
         var singleCalls = 0;
