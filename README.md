@@ -29,7 +29,7 @@ If you need a hosted solution, a GUI, or multi-language support beyond C#, tools
 ## Highlights
 
 - 🔍 **Semantic Chunking** — Analyzes C# classes, methods, properties, constructors and fields separately
-- 🧠 **Local Embeddings** — Uses Ollama or LM Studio locally, no cloud dependency, no data leakage
+- 🧠 **Local Embeddings** — Uses Ollama, LM Studio or any OpenAI-compatible server (llama.cpp, vLLM) locally, no cloud dependency, no data leakage
 - 💾 **SQLite Vector Database** — Simple embedded database with cosine similarity search
 - 🔎 **Semantic Search** — Find code based on meaning, not just keywords
 - 👀 **Watch Mode** — Live incremental re-indexing on file changes (500 ms debounce, Ctrl+C to stop)
@@ -154,6 +154,38 @@ All search features can be configured in `appsettings.json`:
   }
 }
 ```
+
+### Embedding Providers
+
+SSC supports three embedding providers, selected via `"Embedding": "Provider"`:
+
+| Provider | Value | Best for |
+|----------|-------|----------|
+| [Ollama](https://ollama.com) | `ollama` | Default local setup (`ollama pull nomic-embed-text`) |
+| [LM Studio](https://lmstudio.ai) | `lmstudio` | LM Studio's local server |
+| **OpenAI-compatible** | `openai-compatible` | Any server exposing the OpenAI `/v1/embeddings` API: llama.cpp (`llama-server`), vLLM, a remote endpoint, etc. |
+
+For the OpenAI-compatible provider, configure the endpoint in `appsettings.json`:
+
+```json
+{
+  "Embedding": {
+    "Provider": "openai-compatible"
+  },
+  "OpenAICompatible": {
+    "BaseUrl": "http://localhost:8080/v1",
+    "EmbeddingModel": "nomic-embed-text",
+    "ApiKey": ""
+  }
+}
+```
+
+- `BaseUrl` may include the `/v1` suffix or not — both work.
+- `EmbeddingModel` is optional; when empty, the first model reported by `/v1/models` is used.
+- `ApiKey` is sent as a `Bearer` token when set (required for remote endpoints, ignored by local llama.cpp).
+- **Security note:** `ApiKey` in `appsettings.json` is stored in plaintext. For remote endpoints prefer an environment variable (`OpenAICompatible__ApiKey`) or [`dotnet user-secrets`](https://learn.microsoft.com/dotnet/core/tools/dotnet-user-secrets) so a real key never ends up in source control.
+
+**Note:** the `auto` provider (default) only auto-detects LM Studio and Ollama. The OpenAI-compatible provider is only used when explicitly configured — pointing it at a remote endpoint is a deliberate choice, since embeddings leave your machine.
 
 ## Architecture
 
