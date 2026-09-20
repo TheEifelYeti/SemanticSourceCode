@@ -1,17 +1,17 @@
 # SemanticSourceCode
 
-A C# tool for semantic code search with local embeddings. Search your codebase by meaning, not just keywords.
+A C# tool for **semantic source code search** with local embeddings. Search your codebase by meaning, not just keywords.
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple.svg)
-![Tests](https://img.shields.io/badge/Tests-235%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-261%20passing-brightgreen.svg)
 ![Build](https://img.shields.io/badge/Build-passing-brightgreen.svg)
 
 ## Why local-first?
 
 **Your code never leaves your machine.** Embeddings, vector search, and the index all run locally. No telemetry, no API calls, no third-party LLMs. Everything stays on your hardware.
 
-Most AI-powered code search tools send your source code to a cloud server for processing. SemanticSourceCode takes a different approach: the embedding model runs on your own machine via [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai), the vectors are stored in a local SQLite database, and search queries never touch the internet.
+Most AI-powered code search tools send your source code to a cloud server for processing. SemanticSourceCode takes a different approach: the embedding model runs on your own machine via [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) or any OpenAI-compatible server (llama.cpp, vLLM), the vectors are stored in a local SQLite database, and search queries never touch the internet.
 
 ### Comparison
 
